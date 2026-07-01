@@ -1,0 +1,35 @@
+appId: com.henrydavidlie.grabby
+productName: Grabby
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml,package-lock.json}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
+  - '!resources/*'
+  - '!extension/*'
+# Binaries are shipped per-platform as extraResources (outside the asar so they're
+# spawnable). The runtime resolves process.resourcesPath/bin/<platform>.
+mac:
+  target:
+    - dmg
+  category: public.app-category.utilities
+  hardenedRuntime: false
+  gatekeeperAssess: false
+  identity: null # unsigned local build (right-click → Open to bypass Gatekeeper)
+  extraResources:
+    - from: resources/bin/mac
+      to: bin/mac
+      filter: ['**/*']
+win:
+  # No Wine on the macOS build host, so NSIS/portable .exe installers can't be
+  # produced here — ship a portable zip containing Grabby.exe instead.
+  target:
+    - zip
+  extraResources:
+    - from: resources/bin/win
+      to: bin/win
+      filter: ['**/*']

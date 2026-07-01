@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Grabby Downloader",
+  "version": "1.0",
+  "description": "Send the current video or page to the Grabby app to download.",
+  "permissions": ["activeTab", "tabs", "webRequest"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1:8787/*", "http://localhost:8787/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Download with Grabby" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["grabby.css"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+.grabby-fab {
+  position: fixed;
+  z-index: 2147483647;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(59, 130, 246, 0.95);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font: 600 17px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  opacity: 0.88;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.grabby-fab:hover {
+  opacity: 1;
+  transform: scale(1.08);
+}
+.grabby-fab.grabby-ok {
+  background: #16a34a;
+}
+.grabby-fab.grabby-err {
+  background: #dc2626;
+}

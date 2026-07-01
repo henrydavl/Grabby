@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #0e1116;
+  color: #e6edf3;
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Make the macOS hidden-inset title bar area draggable. */
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.no-drag {
+  -webkit-app-region: no-drag;
+}
+
+/* Indeterminate progress bar — a stripe that sweeps across while yt-dlp is
+   preparing (extracting metadata / solving signatures) and there's no % yet. */
+.grabby-indeterminate {
+  position: relative;
+  overflow: hidden;
+  border-radius: 9999px;
+}
+.grabby-indeterminate::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -45%;
+  width: 45%;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, transparent, #38bdf8, transparent);
+  animation: grabby-sweep 1.1s ease-in-out infinite;
+}
+@keyframes grabby-sweep {
+  0% {
+    left: -45%;
+  }
+  100% {
+    left: 100%;
+  }
+}
