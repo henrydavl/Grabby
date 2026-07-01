@@ -128,12 +128,9 @@ one command:
 ./scripts/fetch-binaries.sh
 ```
 
-It downloads yt-dlp (nightly), deno, and ffmpeg for both platforms — Windows `ffmpeg.exe` is a
-static build; the macOS `ffmpeg` is copied from your Homebrew install.
-
-> ⚠️ The Homebrew macOS `ffmpeg` is **dynamically linked** against `/opt/homebrew/lib`, so the
-> `.dmg` currently only runs on Macs with those libs (or Homebrew's ffmpeg installed). A **static**
-> arm64 ffmpeg is needed for a fully portable Mac build — see the roadmap.
+It downloads yt-dlp (nightly), the official **self-contained** deno, and a **static** ffmpeg for
+both platforms (macOS arm64 from martin-riedl.de, Windows x64 from BtbN) — all with zero external
+dependencies, so the packaged apps run on machines without Homebrew or anything else installed.
 
 ## Notes
 
@@ -146,9 +143,9 @@ static build; the macOS `ffmpeg` is copied from your Homebrew install.
 
 - [x] **Browser "send to Grabby" extension** — floating ⬇ button (works inside embedded iframes)
   + toolbar button + network stream sniffing for sites yt-dlp doesn't recognize.
-- [x] **Windows binaries + bundled ffmpeg/deno for distributable builds** — Windows `ffmpeg.exe`
-  is a static build. ⚠️ *The macOS `ffmpeg` is still the Homebrew **dynamically-linked** build, so
-  the `.dmg` isn't fully portable yet; bundling a static arm64 ffmpeg is the remaining gap.*
+- [x] **Fully standalone distributable builds** — yt-dlp, **static** ffmpeg, and **self-contained**
+  deno are bundled for both platforms. Verified with zero Homebrew/external deps, so the `.dmg` and
+  Windows `.zip` run on a clean machine with nothing else installed.
 - [ ] **Clipboard auto-catch** (IDM's signature feature) — *not built yet.* The extension covers
   catching from the browser; clipboard monitoring (detect a copied video URL and offer to grab it)
   is still on the list.

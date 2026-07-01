@@ -25,19 +25,15 @@ chmod +x "$MAC/deno"
 dl https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip "$TMP/deno-win.zip"
 unzip -o -q "$TMP/deno-win.zip" -d "$WIN"
 
-echo "==> ffmpeg"
+echo "==> ffmpeg (static, self-contained — the app must run on machines without Homebrew)"
 # Windows: static build from BtbN.
 dl https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip "$TMP/ff-win.zip"
 unzip -o -j -q "$TMP/ff-win.zip" "*/bin/ffmpeg.exe" -d "$WIN"
-# macOS: use the Homebrew build if present (arm64 static builds have no stable URL).
-if [ -x /opt/homebrew/bin/ffmpeg ]; then
-  cp -L /opt/homebrew/bin/ffmpeg "$MAC/ffmpeg"
-  chmod +x "$MAC/ffmpeg"
-elif command -v ffmpeg >/dev/null 2>&1; then
-  cp -L "$(command -v ffmpeg)" "$MAC/ffmpeg" && chmod +x "$MAC/ffmpeg"
-else
-  echo "  ! macOS ffmpeg not found — run 'brew install ffmpeg' then re-run this script." >&2
-fi
+# macOS: static arm64 build from martin-riedl.de (only system frameworks — NOT Homebrew's
+# dynamically-linked ffmpeg, which would break on Macs without Homebrew).
+dl "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip" "$TMP/ff-mac.zip"
+unzip -o -j -q "$TMP/ff-mac.zip" ffmpeg -d "$MAC"
+chmod +x "$MAC/ffmpeg"
 
 echo "Done. Contents:"
 ls -lh "$MAC" "$WIN"
