@@ -10,8 +10,8 @@ including YouTube) plus `ffmpeg`.
 Prebuilt apps are on the [**Releases**](https://github.com/henrydavl/Grabby/releases/latest) page —
 everything (yt-dlp, ffmpeg, deno) is bundled, no separate installs:
 
-- **macOS (Apple Silicon):** `Grabby-0.1.0-arm64.dmg` — unsigned, so **right-click → Open** on first launch.
-- **Windows (x64):** `Grabby-0.1.0-win.zip` — portable; unzip anywhere and run `Grabby.exe` (SmartScreen → *More info* → *Run anyway*).
+- **macOS (Apple Silicon):** `Grabby-0.1.1-arm64.dmg` — unsigned, so **right-click → Open** on first launch.
+- **Windows (x64):** `Grabby-0.1.1-win.zip` — portable; unzip anywhere and run `Grabby.exe` (SmartScreen → *More info* → *Run anyway*).
 - **Browser extension:** `grabby-extension-chrome.zip` / `grabby-extension-firefox.zip` — see [Install the browser extension](#install-the-browser-extension).
 
 ## Features (v1)
