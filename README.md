@@ -149,4 +149,7 @@ dependencies, so the packaged apps run on machines without Homebrew or anything 
 - [ ] **Clipboard auto-catch** (IDM's signature feature) — *not built yet.* The extension covers
   catching from the browser; clipboard monitoring (detect a copied video URL and offer to grab it)
   is still on the list.
-- [ ] Tray / menu-bar mode.
+- [x] **Tray / menu-bar mode** — a download-arrow menu-bar (macOS) / system-tray (Windows)
+  icon shows queue status ("Downloading N · Queued M" / "Idle"). Closing the window hides Grabby
+  to the tray instead of quitting; "Show Grabby" and "Quit Grabby" live in its menu (Cmd+Q or the
+  tray's Quit fully exits).
