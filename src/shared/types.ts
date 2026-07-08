@@ -64,6 +64,9 @@ export interface DownloadItem {
   filePath?: string // resolved final path once known
   referer?: string // page URL, needed for sniffed stream downloads
   error?: string
+  /** 'video' (yt-dlp) or 'subtitle' (direct file download). Defaults to 'video'. */
+  kind?: 'video' | 'subtitle'
+  subExt?: string // subtitle file extension (srt/vtt/…) when kind === 'subtitle'
 }
 
 /** One thing to try: a URL plus the Referer it should be fetched with. */
@@ -72,10 +75,24 @@ export interface DownloadCandidate {
   referer?: string
 }
 
+/** A subtitle file the extension sniffed from network traffic. */
+export interface SubtitleCandidate {
+  url: string
+  referer?: string
+  /** e.g. "English", "Arabic" — best-effort, derived from filename/lang. */
+  label?: string
+  /** File extension without the dot, e.g. "srt", "vtt". */
+  ext?: string
+}
+
 /** A download request pushed from the browser extension via the bridge. */
 export interface ExternalRequest {
   /** Tried in order: the page URL first, then any sniffed stream URLs. */
   candidates: DownloadCandidate[]
+  /** Sniffed subtitle files, if any (offered via the button's dropdown). */
+  subtitles?: SubtitleCandidate[]
+  /** What the user chose in the dropdown. 'video' (default), 'subtitle', or 'both'. */
+  kind?: 'video' | 'subtitle' | 'both'
 }
 
 /** Browser yt-dlp pulls cookies from, to satisfy YouTube's bot check. */
@@ -104,6 +121,9 @@ export interface DownloadSpec {
   format: FormatKind
   formatLabel: string
   referer?: string
+  /** 'subtitle' downloads the URL as a plain file instead of via yt-dlp. */
+  kind?: 'video' | 'subtitle'
+  subExt?: string // subtitle extension (srt/vtt/…) when kind === 'subtitle'
 }
 
 export interface GrabbyAPI {

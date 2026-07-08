@@ -1,5 +1,12 @@
 appId: com.henrydavidlie.grabby
 productName: Grabby
+# Register the grabby:// URL scheme so the browser extension can cold-launch the
+# app (on mac this writes CFBundleURLTypes into Info.plist; on win it's set at
+# runtime via setAsDefaultProtocolClient).
+protocols:
+  - name: Grabby
+    schemes:
+      - grabby
 directories:
   buildResources: build
 files:

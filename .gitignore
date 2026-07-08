@@ -6,3 +6,6 @@ dist/
 
 # Bundled binaries are large (>100MB); restore via scripts/fetch-binaries.sh (see README).
 resources/bin/
+
+# TypeScript incremental build info (generated)
+*.tsbuildinfo

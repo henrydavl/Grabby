@@ -8,9 +8,12 @@ import type {
   ProgressUpdate
 } from '../shared/types'
 import { startDownload, resolveOutputBase } from './ytdlp'
+import { startSubtitleDownload, resolveSubtitlePath, subtitleExtFromUrl } from './subs'
 
 interface Runtime {
   child?: ChildProcess
+  /** Abort fn for a subtitle (non-child) download. */
+  abort?: () => void
   /** True when a non-zero exit was caused by an intentional pause/cancel kill. */
   intentionalStop?: 'paused' | 'canceled'
   /** Highest percent seen this run, so the bar never jumps backward (YouTube
@@ -55,7 +58,9 @@ export class DownloadManager extends EventEmitter {
         percent: 0,
         speed: '',
         eta: '',
-        outputDir: this.settings.outputDir
+        outputDir: this.settings.outputDir,
+        kind: s.kind,
+        subExt: s.subExt
       }
       this.items.set(item.id, item)
       this.runtime.set(item.id, {})
@@ -89,9 +94,10 @@ export class DownloadManager extends EventEmitter {
     const item = this.items.get(id)
     const rt = this.runtime.get(id)
     if (!item || !rt) return
-    if (rt.child && item.status === 'downloading') {
+    if (item.status === 'downloading' && (rt.child || rt.abort)) {
       rt.intentionalStop = 'canceled'
-      rt.child.kill('SIGTERM')
+      rt.child?.kill('SIGTERM')
+      rt.abort?.()
     } else {
       this.patch(id, { status: 'canceled' })
     }
@@ -128,6 +134,11 @@ export class DownloadManager extends EventEmitter {
     const item = this.items.get(id)
     const rt = this.runtime.get(id)
     if (!item || !rt) return
+
+    if (item.kind === 'subtitle') {
+      this.startSubtitle(id)
+      return
+    }
 
     // "preparing" = process started but no progress yet (metadata extraction +
     // signature solving can take 10–20s before the first byte). The UI shows an
@@ -184,6 +195,49 @@ export class DownloadManager extends EventEmitter {
         })
       } else {
         this.patch(id, { status: 'error', speed: '', eta: '', error: res.error })
+      }
+      this.pump()
+    })
+  }
+
+  /** Download a sniffed subtitle file directly (no yt-dlp). */
+  private startSubtitle(id: string): void {
+    const item = this.items.get(id)
+    const rt = this.runtime.get(id)
+    if (!item || !rt) return
+
+    const ext = item.subExt || subtitleExtFromUrl(item.url)
+    const destPath = item.filePath || resolveSubtitlePath(item.outputDir, item.title, ext)
+    item.filePath = destPath // reuse the same name across a resume
+    this.patch(id, { status: 'downloading', percent: 0, error: undefined, filePath: destPath })
+
+    const handle = startSubtitleDownload({
+      id,
+      url: item.url,
+      destPath,
+      referer: item.referer,
+      onProgress: (p) => {
+        this.patch(id, {
+          status: 'downloading',
+          percent: p.percent,
+          downloaded: p.downloaded,
+          total: p.total
+        })
+        this.emit('progress', p)
+      }
+    })
+    rt.abort = handle.abort
+
+    handle.done.then((res) => {
+      rt.abort = undefined
+      const stop = rt.intentionalStop
+      rt.intentionalStop = undefined
+      if (stop === 'canceled') {
+        this.patch(id, { status: 'canceled', speed: '', eta: '' })
+      } else if (res.code === 0) {
+        this.patch(id, { status: 'completed', percent: 100, filePath: res.filePath })
+      } else {
+        this.patch(id, { status: 'error', error: res.error })
       }
       this.pump()
     })

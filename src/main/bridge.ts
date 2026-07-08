@@ -57,7 +57,9 @@ export function startBridge(onRequest: (req: ExternalRequest) => void): void {
           url?: string
           // streams may be plain URLs (old) or {url, referer} objects (new).
           streams?: (string | { url?: string; referer?: string })[]
+          subs?: { url?: string; referer?: string; label?: string; ext?: string }[]
           referer?: string
+          kind?: 'video' | 'subtitle' | 'both'
         }
         const valid = (u: unknown): u is string => typeof u === 'string' && /^https?:\/\//i.test(u)
         const pageReferer = valid(payload.referer) ? payload.referer : undefined
@@ -77,10 +79,26 @@ export function startBridge(onRequest: (req: ExternalRequest) => void): void {
         const seen = new Set<string>()
         const unique = candidates.filter((c) => !seen.has(c.url) && seen.add(c.url))
 
-        if (unique.length > 0) {
-          onRequest({ candidates: unique })
+        // Sniffed subtitle files (offered via the button dropdown).
+        const seenSub = new Set<string>()
+        const subtitles = (payload.subs ?? [])
+          .filter((s) => s && valid(s.url) && !seenSub.has(s.url!) && seenSub.add(s.url!))
+          .map((s) => ({
+            url: s.url!,
+            referer: valid(s.referer) ? s.referer : pageReferer,
+            label: typeof s.label === 'string' ? s.label : undefined,
+            ext: typeof s.ext === 'string' ? s.ext : undefined
+          }))
+
+        const kind = payload.kind === 'subtitle' || payload.kind === 'both' ? payload.kind : 'video'
+
+        // 'subtitle' needs at least a sub; 'video'/'both' need at least a candidate.
+        const haveVideo = unique.length > 0
+        const haveSub = subtitles.length > 0
+        if ((kind === 'subtitle' && haveSub) || (kind !== 'subtitle' && haveVideo)) {
+          onRequest({ candidates: unique, subtitles, kind })
           res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ ok: true, candidates: unique.length }))
+          res.end(JSON.stringify({ ok: true, candidates: unique.length, subtitles: subtitles.length }))
         } else {
           res.writeHead(400)
           res.end('missing or invalid url')

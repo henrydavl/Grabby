@@ -10,8 +10,8 @@ including YouTube) plus `ffmpeg`.
 Prebuilt apps are on the [**Releases**](https://github.com/henrydavl/Grabby/releases/latest) page —
 everything (yt-dlp, ffmpeg, deno) is bundled, no separate installs:
 
-- **macOS (Apple Silicon):** `Grabby-0.1.2-arm64.dmg` — unsigned, so **right-click → Open** on first launch.
-- **Windows (x64):** `Grabby-0.1.2-win.zip` — portable; unzip anywhere and run `Grabby.exe` (SmartScreen → *More info* → *Run anyway*).
+- **macOS (Apple Silicon):** `Grabby-0.1.3-arm64.dmg` — unsigned, so **right-click → Open** on first launch.
+- **Windows (x64):** `Grabby-0.1.3-win.zip` — portable; unzip anywhere and run `Grabby.exe` (SmartScreen → *More info* → *Run anyway*).
 - **Browser extension:** `grabby-extension-chrome.zip` / `grabby-extension-firefox.zip` — see [Install the browser extension](#install-the-browser-extension).
 
 ## Features (v1)
@@ -23,6 +23,11 @@ everything (yt-dlp, ffmpeg, deno) is bundled, no separate installs:
 - **Numbered filenames** — re-downloading the same video adds ` (1)`, ` (2)`… instead of overwriting.
 - **Browser extension** — IDM-style ⬇ button on videos (incl. embedded iframes) + a toolbar button,
   with network stream sniffing for sites yt-dlp doesn't recognize. See below.
+- **Subtitle downloads** — when the extension sniffs a subtitle (`.srt`/`.vtt`/…) the ⬇ button
+  becomes a split button whose dropdown offers **Video**, **Subtitle**, or **Video + Subtitle**
+  (like IDM). Subtitles download straight to your output folder, named after the video.
+- **Auto-launch** — click the extension button and Grabby opens itself if it isn't already
+  running (via a `grabby://` handler), then receives the download — no need to start it first.
 - **Playlists & channels** — paste a playlist URL to queue every video.
 - **Concurrency limit** — run 1–5 downloads at once (default 3).
 - **YouTube cookies** — pick the browser you're signed into (Chrome/Firefox/**Zen**/Safari/…) so
@@ -146,6 +151,11 @@ dependencies, so the packaged apps run on machines without Homebrew or anything 
 - [x] **Fully standalone distributable builds** — yt-dlp, **static** ffmpeg, and **self-contained**
   deno are bundled for both platforms. Verified with zero Homebrew/external deps, so the `.dmg` and
   Windows `.zip` run on a clean machine with nothing else installed.
+- [x] **Subtitle downloads + split-button dropdown** — the extension sniffs subtitle files
+  (`.srt`/`.vtt`/…) from network traffic and the ⬇ button gains a dropdown (Video / Subtitle /
+  Video + Subtitle); Grabby downloads the sub file directly, named after the video.
+- [x] **Auto-launch when closed** — the extension cold-starts Grabby via a `grabby://` protocol
+  handler (single-instance) if the app isn't running, then delivers the download over the bridge.
 - [ ] **Clipboard auto-catch** (IDM's signature feature) — *not built yet.* The extension covers
   catching from the browser; clipboard monitoring (detect a copied video URL and offer to grab it)
   is still on the list.

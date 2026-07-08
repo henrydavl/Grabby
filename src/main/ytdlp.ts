@@ -92,7 +92,7 @@ function ffmpegArgs(): string[] {
 }
 
 /** Make a title safe to use as a filename (strip only FS-illegal chars). */
-function sanitizeName(name: string): string {
+export function sanitizeName(name: string): string {
   return (
     name
       // eslint-disable-next-line no-control-regex

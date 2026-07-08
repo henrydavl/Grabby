@@ -52,8 +52,13 @@ export function DownloadRow({ item }: { item: DownloadItem }): React.JSX.Element
     <div className="rounded-lg border border-edge bg-panel px-4 py-3">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
-          <div className="truncate text-sm font-medium" title={item.title}>
-            {item.title}
+          <div className="flex items-center gap-1.5 truncate text-sm font-medium" title={item.title}>
+            {item.kind === 'subtitle' && (
+              <span className="flex-shrink-0 rounded bg-edge px-1 py-0.5 text-[10px] font-semibold leading-none text-slate-300">
+                SUB
+              </span>
+            )}
+            <span className="truncate">{item.title}</span>
           </div>
           <div className="mt-0.5 flex items-center gap-2 text-xs">
             <span className={STATUS_COLOR[item.status]}>{STATUS_LABEL[item.status]}</span>

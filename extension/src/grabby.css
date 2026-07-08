@@ -1,30 +1,101 @@
+/* Wrapper: an invisible flex row holding the main button + caret. The buttons
+   carry the visible chrome, so this stays transparent. */
 .grabby-fab {
   position: fixed;
   z-index: 2147483647;
-  width: 34px;
-  height: 34px;
-  padding: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(59, 130, 246, 0.95);
-  color: #fff;
+  align-items: stretch;
+  padding: 0;
   border: none;
-  border-radius: 8px;
+  background: transparent;
   font: 600 17px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   line-height: 1;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.45));
   opacity: 0.88;
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 .grabby-fab:hover {
   opacity: 1;
-  transform: scale(1.08);
+  transform: scale(1.06);
 }
-.grabby-fab.grabby-ok {
+
+.grabby-main,
+.grabby-caret {
+  padding: 0;
+  height: 34px;
+  border: none;
+  background: rgba(59, 130, 246, 0.95);
+  color: #fff;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.grabby-main {
+  width: 34px;
+  border-radius: 8px;
+}
+.grabby-caret {
+  width: 0;
+  font-size: 12px;
+  border-radius: 0 8px 8px 0;
+  border-left: 1px solid rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+  opacity: 0;
+}
+/* When Grabby sniffed a subtitle, reveal the caret and square off the main
+   button's right edge so they read as one split control. */
+.grabby-fab.grabby-has-subs .grabby-main {
+  border-radius: 8px 0 0 8px;
+}
+.grabby-fab.grabby-has-subs .grabby-caret {
+  width: 20px;
+  opacity: 1;
+}
+
+.grabby-main.grabby-ok {
   background: #16a34a;
 }
-.grabby-fab.grabby-err {
+.grabby-main.grabby-err {
   background: #dc2626;
+}
+
+/* Dropdown menu (opens below the control). */
+.grabby-menu {
+  position: absolute;
+  top: 38px;
+  right: 0;
+  min-width: 148px;
+  padding: 4px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  background: #1b2130;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+.grabby-fab.grabby-open .grabby-menu {
+  display: flex;
+}
+.grabby-item {
+  padding: 7px 10px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #e5e9f0;
+  font: 500 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.grabby-item:hover {
+  background: rgba(59, 130, 246, 0.9);
+  color: #fff;
+}
+/* Subtitle items only make sense when a subtitle was sniffed. */
+.grabby-fab:not(.grabby-has-subs) .grabby-sub {
+  display: none;
 }
