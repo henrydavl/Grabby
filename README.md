@@ -8,7 +8,7 @@ including YouTube) plus `ffmpeg`.
 ## Download
 
 Prebuilt apps are on the [**Releases**](https://github.com/henrydavl/Grabby/releases/latest) page —
-everything (yt-dlp, ffmpeg, deno) is bundled, no separate installs:
+everything (yt-dlp, ffmpeg) is bundled, no separate installs:
 
 - **macOS (Apple Silicon):** `Grabby-0.1.3-arm64.dmg` — unsigned, so **right-click → Open** on first launch.
 - **Windows (x64):** `Grabby-0.1.3-win.zip` — portable; unzip anywhere and run `Grabby.exe` (SmartScreen → *More info* → *Run anyway*).
@@ -39,7 +39,7 @@ everything (yt-dlp, ffmpeg, deno) is bundled, no separate installs:
 
 ## Setup (after cloning)
 
-The helper binaries (yt-dlp, ffmpeg, deno) are **not** in git — they're large and platform-specific.
+The helper binaries (yt-dlp, ffmpeg) are **not** in git — they're large and platform-specific.
 Restore them before running or building:
 
 ```bash
@@ -51,20 +51,17 @@ npm install
 
 - **Node 22 LTS for development** (Node 25 breaks the Vite dev server). `nvm use 22`.
 - The packaged app bundles its own Node via Electron — this only affects dev.
-- **Deno** — required for YouTube (its signature / "n" challenges need a JS runtime to solve;
-  without it you get *"No video formats found"* / *"Only images are available"*). **It's bundled
-  in the release builds** (`resources/bin/<platform>/deno`), and the app prepends that folder to
-  the spawned yt-dlp's PATH. When running from source, `scripts/fetch-binaries.sh` downloads it
-  (or `brew install deno`).
+- **JavaScript runtime for YouTube** — YouTube's signature / "n" challenges need one (Node ≥ 22).
+  Grabby uses **its own Electron executable as Node** (`ELECTRON_RUN_AS_NODE`), so nothing extra
+  is installed or bundled — this also works when running from source.
 
 ### Making YouTube work
 
-YouTube actively fights extraction. Three things must line up:
+YouTube actively fights extraction. Two things must line up:
 
 1. **Cookies** — in Settings, pick the browser you're signed into YouTube on. (Zen browser is
    supported and auto-detected.)
-2. **Deno** — `brew install deno`.
-3. **yt-dlp nightly** — stable lags behind YouTube changes. The "Update yt-dlp" button helps;
+2. **yt-dlp nightly** — stable lags behind YouTube changes. The "Update yt-dlp" button helps;
    to switch channels: `resources/bin/mac/yt-dlp --update-to nightly`.
 
 ## Develop
@@ -128,7 +125,7 @@ quality picker.
   - `ipc.ts` + `src/preload/` — a locked-down `contextBridge` API (`window.grabby`); the
     renderer never spawns processes itself.
 - `src/renderer/` — React + Tailwind UI (URL bar, format picker, queue rows, settings).
-- `resources/bin/<platform>/` — the bundled `yt-dlp`, `ffmpeg`, and `deno` binaries.
+- `resources/bin/<platform>/` — the bundled `yt-dlp` and `ffmpeg` binaries.
 
 ## Binaries
 
@@ -139,7 +136,7 @@ one command:
 ./scripts/fetch-binaries.sh
 ```
 
-It downloads yt-dlp (nightly), the official **self-contained** deno, and a **static** ffmpeg for
+It downloads yt-dlp (nightly) and a **static** ffmpeg for
 both platforms (macOS arm64 from martin-riedl.de, Windows x64 from BtbN) — all with zero external
 dependencies, so the packaged apps run on machines without Homebrew or anything else installed.
 
@@ -154,8 +151,8 @@ dependencies, so the packaged apps run on machines without Homebrew or anything 
 
 - [x] **Browser "send to Grabby" extension** — floating ⬇ button (works inside embedded iframes)
   + toolbar button + network stream sniffing for sites yt-dlp doesn't recognize.
-- [x] **Fully standalone distributable builds** — yt-dlp, **static** ffmpeg, and **self-contained**
-  deno are bundled for both platforms. Verified with zero Homebrew/external deps, so the `.dmg` and
+- [x] **Fully standalone distributable builds** — yt-dlp and **static** ffmpeg are bundled for
+  both platforms (YouTube's JS challenges run on Electron's built-in Node). Verified with zero Homebrew/external deps, so the `.dmg` and
   Windows `.zip` run on a clean machine with nothing else installed.
 - [x] **Subtitle downloads + split-button dropdown** — the extension sniffs subtitle files
   (`.srt`/`.vtt`/…) from network traffic and the ⬇ button gains a dropdown (Video / Subtitle /

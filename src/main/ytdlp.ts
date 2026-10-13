@@ -186,14 +186,24 @@ function cookieArgs(): string[] {
 }
 
 /**
+ * YouTube's signature / "n" challenges need a JavaScript runtime (Node ≥ 22).
+ * Grabby *is* one: Electron's own executable runs as plain Node when
+ * ELECTRON_RUN_AS_NODE is set (see spawnEnv), so yt-dlp uses it instead of a
+ * separately bundled ~80 MB deno.
+ */
+function jsRuntimeArgs(): string[] {
+  return ['--no-js-runtimes', '--js-runtimes', `node:${process.execPath}`]
+}
+
+/**
  * Environment for spawned yt-dlp processes. A GUI app launched from Finder gets a
- * minimal PATH that usually omits Homebrew, so yt-dlp can't find its JS runtime
- * (deno) — which YouTube now requires to solve signature challenges. Prepend the
- * bundled bin dir plus common Homebrew/system locations so deno + ffmpeg resolve.
+ * minimal PATH that usually omits Homebrew, so prepend the bundled bin dir plus
+ * common Homebrew/system locations so ffmpeg resolves. ELECTRON_RUN_AS_NODE makes
+ * the JS runtime from jsRuntimeArgs() behave as Node rather than open the app.
  */
 function spawnEnv(): NodeJS.ProcessEnv {
   const sep = process.platform === 'win32' ? ';' : ':'
-  // The bundled bin dir always goes first (holds deno/ffmpeg); the extra Unix
+  // The bundled bin dir always goes first (holds ffmpeg); the extra Unix
   // locations only make sense off-Windows.
   const extra =
     process.platform === 'win32'
@@ -201,7 +211,7 @@ function spawnEnv(): NodeJS.ProcessEnv {
       : [binDir(), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']
   const existing = process.env.PATH ? process.env.PATH.split(sep) : []
   const merged = [...extra, ...existing].filter((p, i, a) => p && a.indexOf(p) === i)
-  return { ...process.env, PATH: merged.join(sep) }
+  return { ...process.env, PATH: merged.join(sep), ELECTRON_RUN_AS_NODE: '1' }
 }
 
 /** Run yt-dlp and collect stdout (used for JSON info dumps and `-U`). */
@@ -209,7 +219,7 @@ function run(args: string[], timeoutMs = 60_000): Promise<{ stdout: string; stde
   return new Promise((resolve, reject) => {
     execFile(
       ytdlpPath(),
-      args,
+      [...jsRuntimeArgs(), ...args],
       { maxBuffer: 64 * 1024 * 1024, timeout: timeoutMs, env: spawnEnv() },
       (err, stdout, stderr) => {
         // A non-zero exit is a real failure even when yt-dlp printed something
@@ -587,7 +597,7 @@ export function startDownload(opts: {
     url
   ]
 
-  const child = spawn(ytdlpPath(), args, { windowsHide: true, env: spawnEnv() })
+  const child = spawn(ytdlpPath(), [...jsRuntimeArgs(), ...args], { windowsHide: true, env: spawnEnv() })
   let filePath: string | undefined
   let buf = ''
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Downloads the bundled helper binaries (yt-dlp, ffmpeg, deno) for macOS and
+# Downloads the bundled helper binaries (yt-dlp, ffmpeg) for macOS and
 # Windows into resources/bin/. These are gitignored (too large for GitHub), so
 # run this once after cloning, before `npm run build`.
 set -euo pipefail
@@ -18,12 +18,7 @@ dl https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-d
 dl https://github.com/yt-dlp/yt-dlp-nightly-builds/releases/latest/download/yt-dlp.exe "$WIN/yt-dlp.exe"
 chmod +x "$MAC/yt-dlp"
 
-echo "==> deno (JS runtime yt-dlp needs to solve YouTube signatures)"
-dl https://github.com/denoland/deno/releases/latest/download/deno-aarch64-apple-darwin.zip "$TMP/deno-mac.zip"
-unzip -o -q "$TMP/deno-mac.zip" -d "$MAC"
-chmod +x "$MAC/deno"
-dl https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip "$TMP/deno-win.zip"
-unzip -o -q "$TMP/deno-win.zip" -d "$WIN"
+# No deno: yt-dlp solves YouTube's JS challenges with Electron's built-in Node.
 
 echo "==> ffmpeg (static, self-contained — the app must run on machines without Homebrew)"
 # Windows: static build from BtbN.

@@ -9,6 +9,12 @@ protocols:
       - grabby
 directories:
   buildResources: build
+# The UI is English-only: drop Chromium's other locale packs. On macOS the
+# afterPack hook does it (electronLanguages misses the framework's .lproj
+# folders) and also ad-hoc signs the bundle.
+electronLanguages:
+  - en
+afterPack: scripts/after-pack.cjs
 files:
   - '!**/.vscode/*'
   - '!src/*'
@@ -28,9 +34,14 @@ mac:
   gatekeeperAssess: false
   identity: null # unsigned local build (right-click → Open to bypass Gatekeeper)
   extraResources:
+    # deno isn't shipped: yt-dlp uses Electron's built-in Node for YouTube's JS
+    # challenges (see jsRuntimeArgs in src/main/ytdlp.ts).
     - from: resources/bin/mac
       to: bin/mac
-      filter: ['**/*']
+      filter: ['**/*', '!deno*']
+dmg:
+  # LZFSE compresses noticeably better than the default zlib (macOS 10.11+).
+  format: ULFO
 win:
   # No Wine on the macOS build host, so NSIS/portable .exe installers can't be
   # produced here — ship a portable zip containing Grabby.exe instead.
@@ -39,4 +50,4 @@ win:
   extraResources:
     - from: resources/bin/win
       to: bin/win
-      filter: ['**/*']
+      filter: ['**/*', '!deno*']
