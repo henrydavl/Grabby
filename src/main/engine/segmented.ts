@@ -1,8 +1,9 @@
-import { request as httpRequest, Agent as HttpAgent, type ClientRequest, type IncomingMessage } from 'http'
-import { request as httpsRequest, Agent as HttpsAgent } from 'https'
+import type { ClientRequest, IncomingMessage } from 'http'
 import { existsSync, promises as fsp } from 'fs'
 import { dirname } from 'path'
 import type { HttpHeaders } from '../../shared/types'
+import { EngineError, httpError, isAuthError, retryDelay, toEngineError } from './errors'
+import { HttpClient } from './http'
 
 /**
  * Grabby's own multi-connection HTTP downloader, modelled on IDM's "dynamic
@@ -39,23 +40,13 @@ export interface EngineResult {
 export interface SegmentedOptions {
   url: string
   headers: HttpHeaders
+  /** Host the captured Cookie/Authorization belong to (never sent elsewhere). */
+  credentialHost: string | null
   /** Final path; work happens in `${destPath}.grabby-part` + `.grabby-state.json`. */
   destPath: string
   /** Max parallel connections (1 disables splitting). */
   connections: number
   onProgress: (p: EngineProgress) => void
-}
-
-type ErrorKind = 'transient' | 'fatal' | 'fallback' | 'throttled'
-
-class EngineError extends Error {
-  constructor(
-    message: string,
-    public kind: ErrorKind,
-    public retryAfterMs?: number
-  ) {
-    super(message)
-  }
 }
 
 interface Segment {
@@ -79,43 +70,15 @@ interface SavedState {
 }
 
 const MIN_SPLIT = 1024 * 1024 // never create a segment smaller than this
-const STALL_MS = 20_000 // no bytes for this long = dead connection
 const NO_PROGRESS_LIMIT_MS = 120_000 // give up (and let the queue's retry/backoff take over)
 const STATE_INTERVAL_MS = 2_000
 const PROGRESS_INTERVAL_MS = 500
-const MAX_REDIRECTS = 5
 const AUTH_RETRIES = 3 // 403s after data flowed, before calling the link expired
-
-function retryDelay(attempts: number): number {
-  return Math.min(1_000 * 2 ** (attempts - 1), 30_000)
-}
-
-function httpError(status: number, retryAfter?: string): EngineError {
-  if (status === 429 || status === 503) {
-    const secs = Number(retryAfter)
-    return new EngineError(`HTTP Error ${status}`, 'throttled', secs > 0 ? secs * 1000 : undefined)
-  }
-  if (status === 401 || status === 403 || status === 410) {
-    // Often a TLS-fingerprint / bot block that yt-dlp's impersonation gets past,
-    // or a per-connection limit (decided by the caller from context).
-    return new EngineError(`HTTP Error ${status}`, 'fallback')
-  }
-  if (status >= 500) return new EngineError(`HTTP Error ${status}`, 'transient')
-  return new EngineError(`HTTP Error ${status}`, 'fatal')
-}
-
-function toEngineError(e: unknown): EngineError {
-  if (e instanceof EngineError) return e
-  const msg = e instanceof Error ? e.message : String(e)
-  if (/ENOSPC|EACCES|EROFS|EPERM/.test(msg)) return new EngineError(msg, 'fatal')
-  return new EngineError(msg || 'connection error', 'transient')
-}
 
 export class SegmentedDownload {
   private readonly partPath: string
   private readonly statePath: string
-  private readonly httpAgent: HttpAgent
-  private readonly httpsAgent: HttpsAgent
+  private readonly http: HttpClient
   private fd: fsp.FileHandle | null = null
 
   private segments: Segment[] = []
@@ -140,8 +103,7 @@ export class SegmentedDownload {
     this.partPath = `${opts.destPath}.grabby-part`
     this.statePath = `${opts.destPath}.grabby-state.json`
     this.maxConns = Math.max(1, Math.floor(opts.connections))
-    this.httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 32 })
-    this.httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 32 })
+    this.http = new HttpClient(opts.headers, opts.credentialHost)
   }
 
   /** Abort all connections; run() resolves with the state saved for a later resume. */
@@ -195,8 +157,7 @@ export class SegmentedDownload {
       clearInterval(progressTimer)
       clearInterval(stateTimer)
       if (this.retryTimer) clearTimeout(this.retryTimer)
-      this.httpAgent.destroy()
-      this.httpsAgent.destroy()
+      this.http.destroy()
       await this.fd?.close().catch(() => {})
       this.fd = null
     }
@@ -362,7 +323,7 @@ export class SegmentedDownload {
       seg.retryAt = Date.now() + (err.retryAfterMs ?? retryDelay(seg.attempts))
       return
     }
-    if (err.kind === 'fallback' && this.receivedAny && /^HTTP Error (401|403|410)/.test(err.message)) {
+    if (err.kind === 'fallback' && this.receivedAny && isAuthError(err)) {
       // It worked until now, so this is a lagging connection limit or an
       // expired link, not a block. Retry a few times; if it persists, keep the
       // bytes and let the queue retry (and resume) later.
@@ -390,55 +351,10 @@ export class SegmentedDownload {
     seg.retryAt = Date.now() + (err.retryAfterMs ?? retryDelay(seg.attempts))
   }
 
-  private open(url: string, range: string | null, redirects = 0): Promise<{ res: IncomingMessage; req: ClientRequest }> {
-    return new Promise((resolve, reject) => {
-      let u: URL
-      try {
-        u = new URL(url)
-      } catch {
-        reject(new EngineError('invalid URL', 'fatal'))
-        return
-      }
-      const secure = u.protocol === 'https:'
-      const req = (secure ? httpsRequest : httpRequest)(
-        u,
-        {
-          method: 'GET',
-          agent: secure ? this.httpsAgent : this.httpAgent,
-          headers: {
-            ...this.opts.headers,
-            // Byte ranges must refer to the raw file, never a compressed stream.
-            'Accept-Encoding': 'identity',
-            ...(range ? { Range: range } : {})
-          }
-        },
-        (res) => {
-          const status = res.statusCode ?? 0
-          if (status >= 300 && status < 400 && res.headers.location) {
-            res.resume()
-            if (redirects >= MAX_REDIRECTS) {
-              reject(new EngineError('too many redirects', 'fallback'))
-              return
-            }
-            // Redirect targets (signed CDN URLs) are resolved fresh per connection,
-            // so an expired one is simply re-issued.
-            this.open(new URL(res.headers.location, u).href, range, redirects + 1).then(resolve, reject)
-            return
-          }
-          resolve({ res, req })
-        }
-      )
-      // Socket inactivity — covers both connect and mid-body stalls.
-      req.setTimeout(STALL_MS, () => req.destroy(new EngineError('connection stalled', 'transient')))
-      req.on('error', (e) => reject(toEngineError(e)))
-      req.end()
-    })
-  }
-
   private async fetchSegment(seg: Segment): Promise<void> {
     const range =
       this.rangeOk === false ? null : `bytes=${seg.pos}-${Number.isFinite(seg.end) ? seg.end : ''}`
-    const { res, req } = await this.open(this.opts.url, range)
+    const { res, req } = await this.http.open(this.opts.url, range)
     if (this.stopped) {
       req.destroy()
       return

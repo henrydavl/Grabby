@@ -11,12 +11,20 @@ import {
   type DownloadStatus,
   type ProgressUpdate
 } from '../shared/types'
-import { startDownload, resolveOutputBase, type DownloadResult } from './ytdlp'
+import {
+  startDownload,
+  resolveOutputBase,
+  resolveFormats,
+  ffmpegBinary,
+  type DownloadResult
+} from './ytdlp'
 import { startSubtitleDownload, resolveSubtitlePath, subtitleExtFromUrl } from './subs'
 import { isRetryable, retryDelayMs } from './retryPolicy'
 import { saveQueue } from './queueStore'
-import { SegmentedDownload } from './engine/segmented'
+import { SegmentedDownload, type EngineProgress } from './engine/segmented'
+import { HlsDownload } from './engine/hls'
 import { formatBytes, formatEta } from './engine/format'
+import { hostOf } from './engine/http'
 
 interface Runtime {
   child?: ChildProcess
@@ -98,6 +106,7 @@ export class DownloadManager extends EventEmitter {
         referer: s.referer,
         headers: s.headers,
         direct: s.direct,
+        hls: s.hls,
         status: 'queued',
         percent: 0,
         speed: '',
@@ -219,9 +228,9 @@ export class DownloadManager extends EventEmitter {
     }
     // Plain files go through Grabby's multi-connection engine; audio-only needs
     // yt-dlp's conversion, and anything the engine couldn't fetch stays on yt-dlp.
-    if (item.direct && item.format !== 'audio' && !item.useYtdlp) {
-      this.startEngine(id)
-      return
+    if (item.format !== 'audio' && !item.useYtdlp) {
+      if (item.direct) return this.startEngine(id)
+      if (item.hls) return this.startHls(id)
     }
 
     // "preparing" = process started but no progress yet (metadata extraction +
@@ -310,34 +319,11 @@ export class DownloadManager extends EventEmitter {
         ...direct.headers,
         ...item.headers
       },
+      // The browser's cookies were captured for the sniffed URL's host only.
+      credentialHost: hostOf(item.url),
       destPath: join(item.outputDir, `${item.outputBase}.${direct.ext}`),
       connections: this.settings.connections,
-      onProgress: (p) => {
-        // Still connecting to a fresh download: stay in "preparing".
-        if (p.downloaded === 0 && p.connections === 0 && !p.reconnecting) return
-        const percent = p.total ? (100 * p.downloaded) / p.total : 0
-        const update: ProgressUpdate = {
-          id,
-          percent,
-          speed: p.speed > 0 ? `${formatBytes(p.speed)}/s` : '',
-          eta: p.total && p.speed > 0 ? formatEta((p.total - p.downloaded) / p.speed) : '',
-          downloaded: formatBytes(p.downloaded),
-          total: p.total ? formatBytes(p.total) : '',
-          connections: p.connections
-        }
-        this.patch(id, {
-          status: 'downloading',
-          percent,
-          speed: update.speed,
-          eta: update.eta,
-          downloaded: update.downloaded,
-          total: update.total,
-          connections: p.connections,
-          notice: p.reconnecting ? 'Connection lost — reconnecting…' : undefined,
-          ...this.progressedPastFailure(rt, percent)
-        })
-        this.emit('progress', update)
-      }
+      onProgress: (p) => this.engineProgress(id, p)
     })
     rt.abort = () => job.stop()
 
@@ -345,6 +331,98 @@ export class DownloadManager extends EventEmitter {
       rt.abort = undefined
       this.settle(id, res)
     })
+  }
+
+  /**
+   * HLS with Grabby's engine: yt-dlp resolves the chosen quality into media
+   * playlist URL(s) — fresh tokens on every start — then the engine downloads
+   * and remuxes them. Anything that isn't plain HLS goes back to yt-dlp.
+   */
+  private startHls(id: string): void {
+    const item = this.items.get(id)
+    const rt = this.runtime.get(id)
+    if (!item || !rt) return
+
+    if (!item.outputBase) {
+      item.outputBase = resolveOutputBase(item.outputDir, item.title, item.format)
+    }
+    this.patch(id, {
+      status: 'preparing',
+      percent: 0,
+      speed: '',
+      eta: '',
+      notice: undefined,
+      retryAt: undefined,
+      error: undefined,
+      connections: undefined
+    })
+
+    let stopped = false
+    let job: HlsDownload | null = null
+    rt.abort = () => {
+      stopped = true
+      job?.stop()
+    }
+
+    const run = async (): Promise<DownloadResult> => {
+      const formats = await resolveFormats(item.url, item.format, item.referer, item.headers)
+      if (stopped) return { code: 1, error: 'stopped' }
+      if (formats.length === 0 || !formats.every((f) => f.protocol.startsWith('m3u8'))) {
+        return { code: 1, error: 'not an HLS stream', fallback: true }
+      }
+      job = new HlsDownload({
+        tracks: formats.map((f) => f.url),
+        // yt-dlp's request headers, then the browser's own (cookies, exact Referer/UA) on top.
+        headers: {
+          ...(item.referer ? { Referer: item.referer } : {}),
+          ...formats[0].httpHeaders,
+          ...item.headers
+        },
+        credentialHost: hostOf(item.url),
+        destPath: join(item.outputDir, `${item.outputBase}.mp4`),
+        ffmpeg: ffmpegBinary(),
+        connections: this.settings.connections,
+        onProgress: (p) => this.engineProgress(id, p)
+      })
+      return job.run()
+    }
+
+    run()
+      .catch((e): DownloadResult => ({ code: 1, error: e instanceof Error ? e.message : String(e) }))
+      .then((res) => {
+        rt.abort = undefined
+        this.settle(id, res)
+      })
+  }
+
+  /** Progress from one of Grabby's engines → item fields (yt-dlp-style strings). */
+  private engineProgress(id: string, p: EngineProgress): void {
+    const rt = this.runtime.get(id)
+    if (!rt) return
+    // Still connecting to a fresh download: stay in "preparing".
+    if (p.downloaded === 0 && p.connections === 0 && !p.reconnecting) return
+    const percent = p.total ? (100 * p.downloaded) / p.total : 0
+    const update: ProgressUpdate = {
+      id,
+      percent,
+      speed: p.speed > 0 ? `${formatBytes(p.speed)}/s` : '',
+      eta: p.total && p.speed > 0 ? formatEta((p.total - p.downloaded) / p.speed) : '',
+      downloaded: formatBytes(p.downloaded),
+      total: p.total ? formatBytes(p.total) : '',
+      connections: p.connections
+    }
+    this.patch(id, {
+      status: 'downloading',
+      percent,
+      speed: update.speed,
+      eta: update.eta,
+      downloaded: update.downloaded,
+      total: update.total,
+      connections: p.connections,
+      notice: p.reconnecting ? 'Connection lost — reconnecting…' : undefined,
+      ...this.progressedPastFailure(rt, percent)
+    })
+    this.emit('progress', update)
   }
 
   /** Download a sniffed subtitle file directly (no yt-dlp). */

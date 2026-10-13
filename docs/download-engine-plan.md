@@ -145,7 +145,7 @@ state files make the resume byte-exact.
 | **0. Quick wins** ✅ done | yt-dlp flags: `--retries infinite --fragment-retries infinite --retry-sleep exp=1:30 --socket-timeout 30 -N 8`. App-level auto-retry with backoff on non-fatal exit (yt-dlp `--continue` resumes). Persist queue. | Fixes "cut off on bad network" now; fixes the HLS latency-bound case |
 | **1. Extension sniffing** ✅ done | Header capture, MAIN-world manifest + DRM detection, frame association; pass headers via `--add-header` for now | Biggest lever for "works on every embed" |
 | **2. Engine core** ✅ done | `HttpSegmentedJob` + RetryPolicy + StateFile + watchdog, with a local test server that simulates drops, per-connection throttling and 403 expiry | Fixes the 500 KB/s case on progressive files |
-| **3. HLS engine** | `HlsJob` + ffmpeg remux; route sniffed HLS through it | Full control of retries/refresh on HLS |
+| **3. HLS engine** ✅ done | `HlsJob` + ffmpeg remux; route sniffed HLS through it | Full control of retries/refresh on HLS |
 | **4. Integration** | yt-dlp `-J` → engine for progressive formats (non-YouTube first), RefreshAddress, stream picker UI | Ties it together |
 | **5. Extras** | MSE recording fallback, speed limiter, per-host connection caps | Nice to have |
 
@@ -192,6 +192,32 @@ Phase 2 as built (`src/main/engine/segmented.ts`):
   1/4/8/16, default 8.
 - **Measured.** On a local host throttled to 500 KB/s per connection, a 32 MB file downloads at 0.49 MB/s with 1
   connection, **3.9 MB/s with 8** and 7.7 MB/s with 16. The same file through yt-dlp runs at 501 KiB/s.
+
+Phase 3 as built (`src/main/engine/hls.ts`, `m3u8.ts`, shared `http.ts` / `errors.ts`):
+- **Choosing the stream.** At download time yt-dlp runs `-J -f <selector>`, which picks the variant and any separate audio
+  track and returns fresh media-playlist URLs. This runs again on every start or retry, so expired tokens get refreshed.
+- **Downloading.**
+  - Per track, N workers fetch segments in parallel and a writer appends them in order. Read-ahead is limited to 4
+    segments per connection.
+  - Separate audio tracks get a quarter of the connections.
+  - AES-128 is supported (explicit IV, or the media-sequence IV). So are EXT-X-MAP init segments (fMP4) and
+    EXT-X-BYTERANGE.
+  - TS segments disguised as images are unwrapped by finding the 0x47 sync pattern.
+- **Remux.** ffmpeg does a copy-only remux to mp4 with `+faststart`, or to mkv if the codecs don't fit MP4.
+- **Reliability.**
+  - Segments are never silently skipped.
+  - A 403 after data has flowed is retried 3 times, then the job fails transiently, so the queue re-resolves fresh URLs
+    and resumes.
+  - Resume is byte-exact: the state is the next segment index plus bytes written, checked against a playlist fingerprint.
+- **Hand-off to yt-dlp.** Live streams, master-instead-of-media playlists, SAMPLE-AES/DRM key formats, multiple init
+  segments and remux failures all go to yt-dlp. Audio-only and non-Generic extractors stay on yt-dlp.
+- **Security.** Cookie/Authorization are sent only to the host they were captured for; never to redirect targets or CDN
+  hosts. This also fixes the Phase 2 engine.
+- **yt-dlp change.** `--fragment-retries` went from `infinite` to `10`. yt-dlp retries fragment 403s too, so an expired
+  token looped forever instead of exiting for the queue to re-extract.
+- **Measured against yt-dlp (local tests).** Throughput was the same (15.7 s vs 14.9 s, both with 8 parallel
+  fragments). On PNG-disguised segments the engine's file decodes cleanly, while yt-dlp reported success with a broken
+  0-second file.
 
 Each phase ships on its own. yt-dlp stays the fallback throughout, so nothing regresses.
 

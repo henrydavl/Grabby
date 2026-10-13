@@ -52,6 +52,8 @@ export interface MediaInfo {
   audioSize?: number
   /** Set when this is one plain file the segmented engine can fetch. */
   direct?: DirectSource
+  /** HLS from the generic extractor: Grabby's HLS engine downloads the variant yt-dlp picks. */
+  hls?: boolean
 }
 
 /** Request headers captured from the browser's own request for a stream (name → value). */
@@ -95,6 +97,8 @@ export interface DownloadItem {
   notice?: string
   /** Plain-file source for Grabby's segmented engine (see DirectSource). */
   direct?: DirectSource
+  /** Download with Grabby's HLS engine (see MediaInfo.hls). */
+  hls?: boolean
   /** The engine couldn't fetch it (blocked, not a file…): use yt-dlp from now on. */
   useYtdlp?: boolean
   /** Parallel connections in use (Grabby's engine only). */
@@ -165,6 +169,7 @@ export interface DownloadSpec {
   referer?: string
   headers?: HttpHeaders
   direct?: DirectSource
+  hls?: boolean
   /** 'subtitle' downloads the URL as a plain file instead of via yt-dlp. */
   kind?: 'video' | 'subtitle'
   subExt?: string // subtitle extension (srt/vtt/…) when kind === 'subtitle'

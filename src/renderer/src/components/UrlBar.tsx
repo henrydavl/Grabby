@@ -160,7 +160,8 @@ export function UrlBar(): React.JSX.Element {
               format,
               formatLabel: label,
               ...source,
-              direct: info.direct
+              direct: info.direct,
+              hls: info.hls
             }
           ]
     // Queue any "video + subtitle" subs, named after the (single) video.

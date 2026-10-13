@@ -56,6 +56,12 @@ export function ytdlpPath(): string {
   return cachedYtdlp
 }
 
+/** The ffmpeg binary itself (bundled, system, or whatever is on PATH). */
+export function ffmpegBinary(): string {
+  const dir = ffmpegDir()
+  return dir ? join(dir, exe('ffmpeg')) : exe('ffmpeg')
+}
+
 /**
  * Directory containing ffmpeg, passed to yt-dlp via --ffmpeg-location.
  * Prefers the bundled binary, then common system locations.
@@ -392,6 +398,16 @@ function directSource(info: RawInfo): DirectSource | undefined {
   return { url: f.url, headers: f.http_headers, ext: f.ext || 'mp4' }
 }
 
+/** HLS from the generic extractor (sniffed .m3u8s, embed hosts): Grabby's HLS engine. */
+function isGenericHls(info: RawInfo): boolean {
+  const formats = info.formats || []
+  return (
+    info.extractor_key === 'Generic' &&
+    formats.length > 0 &&
+    formats.every((f) => (f.protocol || '').startsWith('m3u8'))
+  )
+}
+
 /** Fetch metadata + available formats for a URL (single video or playlist). */
 export async function fetchInfo(
   url: string,
@@ -445,19 +461,61 @@ export async function fetchInfo(
     sizeByHeight,
     bestSize,
     audioSize,
-    direct: directSource(info)
+    direct: directSource(info),
+    hls: isGenericHls(info)
+  }
+}
+
+export interface ResolvedFormat {
+  url: string
+  protocol: string
+  httpHeaders?: HttpHeaders
+}
+
+/**
+ * Let yt-dlp pick the formats for a quality choice — the same selector a yt-dlp
+ * download would use — and return their URLs (video first, then a separate audio
+ * track if merging) without downloading. Re-run on every start, so expiring
+ * signed URLs are always fresh.
+ */
+export async function resolveFormats(
+  url: string,
+  format: FormatKind,
+  referer?: string,
+  headers?: HttpHeaders
+): Promise<ResolvedFormat[]> {
+  const hdr = headerConfig(url, headers, referer)
+  try {
+    const { stdout } = await run([
+      '-J',
+      '--no-playlist',
+      '--no-warnings',
+      ...formatArgs(format),
+      ...(hdr.hasCookies ? [] : cookieArgs()),
+      ...hdr.args,
+      ...IMPERSONATE_ARGS,
+      url
+    ])
+    const info = JSON.parse(stdout) as RawFormat & { requested_formats?: RawFormat[] }
+    return (info.requested_formats ?? [info])
+      .filter((f) => !!f.url)
+      .map((f) => ({ url: f.url!, protocol: f.protocol || '', httpHeaders: f.http_headers }))
+  } finally {
+    hdr.cleanup()
   }
 }
 
 // Ride out flaky networks inside a single yt-dlp run: unlimited retries for
 // transient errors (4xx still fail fast), exponential backoff capped at 30s, and a
-// socket timeout so a dead connection is noticed. -N fetches HLS/DASH fragments
-// in parallel, which matters on high-latency CDNs with small segments.
+// socket timeout so a dead connection is noticed. Fragment retries stay finite:
+// yt-dlp also retries fragment 403s, and an expired token would otherwise loop
+// forever instead of exiting so the queue can re-extract fresh URLs. -N fetches
+// HLS/DASH fragments in parallel, which matters on high-latency CDNs.
 const RESILIENCE_ARGS = [
   '--retries',
   'infinite',
   '--fragment-retries',
-  'infinite',
+  '10',
   '--retry-sleep',
   'exp=1:30',
   '--retry-sleep',
