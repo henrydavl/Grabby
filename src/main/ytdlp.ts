@@ -13,6 +13,7 @@ import { join } from 'path'
 import { app } from 'electron'
 import type {
   CookiesBrowser,
+  DirectSource,
   FormatKind,
   HttpHeaders,
   MediaInfo,
@@ -122,8 +123,12 @@ export function sanitizeName(name: string): string {
  * folder, return "<title> (1)", "<title> (2)", … so re-downloads don't overwrite.
  * Returns the filename stem (no extension); yt-dlp fills the real extension.
  */
-export function resolveOutputBase(outputDir: string, title: string, format: FormatKind): string {
-  const ext = format === 'audio' ? 'mp3' : 'mp4'
+export function resolveOutputBase(
+  outputDir: string,
+  title: string,
+  format: FormatKind,
+  ext: string = format === 'audio' ? 'mp3' : 'mp4'
+): string {
   const base = sanitizeName(title)
   if (!existsSync(join(outputDir, `${base}.${ext}`))) return base
   let n = 1
@@ -218,6 +223,7 @@ function run(args: string[], timeoutMs = 60_000): Promise<{ stdout: string; stde
 
 interface RawInfo {
   _type?: string
+  extractor_key?: string
   title?: string
   thumbnail?: string
   duration_string?: string
@@ -228,6 +234,10 @@ interface RawInfo {
 }
 
 interface RawFormat {
+  url?: string
+  ext?: string
+  protocol?: string
+  http_headers?: HttpHeaders
   height?: number | null
   vcodec?: string | null
   acodec?: string | null
@@ -369,6 +379,19 @@ function headerConfig(url: string, headers: HttpHeaders | undefined, referer?: s
 // extractor so it doesn't change behavior for sites with dedicated extractors.
 const IMPERSONATE_ARGS = ['--extractor-args', 'generic:impersonate']
 
+/**
+ * One plain progressive file from the generic extractor (sniffed mp4s, direct
+ * links, embed hosts): Grabby's segmented engine can download it with many
+ * connections. Site extractors (YouTube etc.) and HLS/DASH stay with yt-dlp.
+ */
+function directSource(info: RawInfo): DirectSource | undefined {
+  const formats = info.formats || []
+  if (info.extractor_key !== 'Generic' || formats.length !== 1) return undefined
+  const f = formats[0]
+  if (!f.url || (f.protocol !== 'http' && f.protocol !== 'https')) return undefined
+  return { url: f.url, headers: f.http_headers, ext: f.ext || 'mp4' }
+}
+
 /** Fetch metadata + available formats for a URL (single video or playlist). */
 export async function fetchInfo(
   url: string,
@@ -421,7 +444,8 @@ export async function fetchInfo(
     availableHeights: heights,
     sizeByHeight,
     bestSize,
-    audioSize
+    audioSize,
+    direct: directSource(info)
   }
 }
 
@@ -456,6 +480,8 @@ export interface DownloadResult {
   code: number
   filePath?: string
   error?: string
+  /** Grabby's engine couldn't fetch it; retry the item with yt-dlp. */
+  fallback?: boolean
 }
 
 export interface DownloadHandle {

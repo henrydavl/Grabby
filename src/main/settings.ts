@@ -11,7 +11,8 @@ function defaults(): AppSettings {
   return {
     outputDir: app.getPath('downloads'),
     maxConcurrent: 3,
-    cookiesBrowser: 'none'
+    cookiesBrowser: 'none',
+    connections: 8
   }
 }
 

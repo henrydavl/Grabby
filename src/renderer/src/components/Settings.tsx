@@ -29,6 +29,10 @@ export function Settings({ onClose }: { onClose: () => void }): React.JSX.Elemen
     setSettings(await window.grabby.setSettings({ maxConcurrent: n }))
   }
 
+  const setConnections = async (n: number): Promise<void> => {
+    setSettings(await window.grabby.setSettings({ connections: n }))
+  }
+
   const setCookies = async (b: CookiesBrowser): Promise<void> => {
     setSettings(await window.grabby.setSettings({ cookiesBrowser: b }))
   }
@@ -74,6 +78,26 @@ export function Settings({ onClose }: { onClose: () => void }): React.JSX.Elemen
               onClick={() => setConcurrent(n)}
               className={`rounded-lg border px-4 py-1.5 text-sm ${
                 settings.maxConcurrent === n
+                  ? 'border-accent bg-accent/10 text-white'
+                  : 'border-edge text-slate-300 hover:border-slate-500'
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+
+        <label className="mt-4 block text-xs text-slate-400">
+          Connections per download{' '}
+          <span className="text-slate-500">(direct files; more = faster on throttled hosts)</span>
+        </label>
+        <div className="mt-1 flex gap-2">
+          {[1, 4, 8, 16].map((n) => (
+            <button
+              key={n}
+              onClick={() => setConnections(n)}
+              className={`rounded-lg border px-4 py-1.5 text-sm ${
+                settings.connections === n
                   ? 'border-accent bg-accent/10 text-white'
                   : 'border-edge text-slate-300 hover:border-slate-500'
               }`}

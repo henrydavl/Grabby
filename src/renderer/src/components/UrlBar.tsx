@@ -153,7 +153,16 @@ export function UrlBar(): React.JSX.Element {
             formatLabel: label,
             referer: source.referer
           }))
-        : [{ url: info.url, title: info.title, format, formatLabel: label, ...source }]
+        : [
+            {
+              url: info.url,
+              title: info.title,
+              format,
+              formatLabel: label,
+              ...source,
+              direct: info.direct
+            }
+          ]
     // Queue any "video + subtitle" subs, named after the (single) video.
     for (const s of pendingSubs) {
       specs.push(subSpec(s, info.isPlaylist ? undefined : info.title))

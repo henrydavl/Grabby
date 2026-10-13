@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import { EventEmitter } from 'events'
 import type { ChildProcess } from 'child_process'
+import { join } from 'path'
 import { net } from 'electron'
 import {
   MAX_AUTO_RETRIES,
@@ -14,10 +15,12 @@ import { startDownload, resolveOutputBase, type DownloadResult } from './ytdlp'
 import { startSubtitleDownload, resolveSubtitlePath, subtitleExtFromUrl } from './subs'
 import { isRetryable, retryDelayMs } from './retryPolicy'
 import { saveQueue } from './queueStore'
+import { SegmentedDownload } from './engine/segmented'
+import { formatBytes, formatEta } from './engine/format'
 
 interface Runtime {
   child?: ChildProcess
-  /** Abort fn for a subtitle (non-child) download. */
+  /** Abort fn for an in-process download (subtitle file or Grabby's engine). */
   abort?: () => void
   /** True when a non-zero exit was caused by an intentional pause/cancel kill. */
   intentionalStop?: 'paused' | 'canceled'
@@ -94,6 +97,7 @@ export class DownloadManager extends EventEmitter {
         formatLabel: s.formatLabel,
         referer: s.referer,
         headers: s.headers,
+        direct: s.direct,
         status: 'queued',
         percent: 0,
         speed: '',
@@ -213,6 +217,12 @@ export class DownloadManager extends EventEmitter {
       this.startSubtitle(id)
       return
     }
+    // Plain files go through Grabby's multi-connection engine; audio-only needs
+    // yt-dlp's conversion, and anything the engine couldn't fetch stays on yt-dlp.
+    if (item.direct && item.format !== 'audio' && !item.useYtdlp) {
+      this.startEngine(id)
+      return
+    }
 
     // "preparing" = process started but no progress yet (metadata extraction +
     // signature solving can take 10–20s before the first byte). The UI shows an
@@ -270,6 +280,73 @@ export class DownloadManager extends EventEmitter {
     })
   }
 
+  /** Download a plain media file with Grabby's segmented, multi-connection engine. */
+  private startEngine(id: string): void {
+    const item = this.items.get(id)
+    const rt = this.runtime.get(id)
+    if (!item || !rt || !item.direct) return
+    const { direct } = item
+
+    if (!item.outputBase) {
+      item.outputBase = resolveOutputBase(item.outputDir, item.title, item.format, direct.ext)
+    }
+    this.patch(id, {
+      status: 'preparing',
+      percent: 0,
+      speed: '',
+      eta: '',
+      notice: undefined,
+      retryAt: undefined,
+      error: undefined,
+      connections: undefined
+    })
+
+    const job = new SegmentedDownload({
+      url: direct.url,
+      // yt-dlp's request headers, then the browser's own (cookies, exact
+      // Referer/UA) on top.
+      headers: {
+        ...(item.referer ? { Referer: item.referer } : {}),
+        ...direct.headers,
+        ...item.headers
+      },
+      destPath: join(item.outputDir, `${item.outputBase}.${direct.ext}`),
+      connections: this.settings.connections,
+      onProgress: (p) => {
+        // Still connecting to a fresh download: stay in "preparing".
+        if (p.downloaded === 0 && p.connections === 0 && !p.reconnecting) return
+        const percent = p.total ? (100 * p.downloaded) / p.total : 0
+        const update: ProgressUpdate = {
+          id,
+          percent,
+          speed: p.speed > 0 ? `${formatBytes(p.speed)}/s` : '',
+          eta: p.total && p.speed > 0 ? formatEta((p.total - p.downloaded) / p.speed) : '',
+          downloaded: formatBytes(p.downloaded),
+          total: p.total ? formatBytes(p.total) : '',
+          connections: p.connections
+        }
+        this.patch(id, {
+          status: 'downloading',
+          percent,
+          speed: update.speed,
+          eta: update.eta,
+          downloaded: update.downloaded,
+          total: update.total,
+          connections: p.connections,
+          notice: p.reconnecting ? 'Connection lost — reconnecting…' : undefined,
+          ...this.progressedPastFailure(rt, percent)
+        })
+        this.emit('progress', update)
+      }
+    })
+    rt.abort = () => job.stop()
+
+    job.run().then((res) => {
+      rt.abort = undefined
+      this.settle(id, res)
+    })
+  }
+
   /** Download a sniffed subtitle file directly (no yt-dlp). */
   private startSubtitle(id: string): void {
     const item = this.items.get(id)
@@ -312,7 +389,7 @@ export class DownloadManager extends EventEmitter {
     if (!item || !rt) return
     const stop = rt.intentionalStop
     rt.intentionalStop = undefined
-    const idle = { speed: '', eta: '', notice: undefined }
+    const idle = { speed: '', eta: '', notice: undefined, connections: undefined }
 
     if (stop === 'paused') {
       this.patch(id, { status: 'paused', ...idle })
@@ -320,6 +397,10 @@ export class DownloadManager extends EventEmitter {
       this.patch(id, { status: 'canceled', ...idle })
     } else if (res.code === 0) {
       this.patch(id, { status: 'completed', percent: 100, ...idle, filePath: res.filePath })
+    } else if (res.fallback) {
+      // Our engine can't fetch this one (blocked, not a plain file…): hand it to
+      // yt-dlp right away, without spending a retry attempt.
+      this.patch(id, { status: 'queued', useYtdlp: true, ...idle, notice: 'Switching to yt-dlp…' })
     } else if (isRetryable(res.error) && (item.attempt ?? 0) < MAX_AUTO_RETRIES) {
       this.scheduleRetry(id, res.error)
     } else {

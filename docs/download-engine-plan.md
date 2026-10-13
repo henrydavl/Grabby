@@ -144,7 +144,7 @@ state files make the resume byte-exact.
 |---|---|---|
 | **0. Quick wins** ✅ done | yt-dlp flags: `--retries infinite --fragment-retries infinite --retry-sleep exp=1:30 --socket-timeout 30 -N 8`. App-level auto-retry with backoff on non-fatal exit (yt-dlp `--continue` resumes). Persist queue. | Fixes "cut off on bad network" now; fixes the HLS latency-bound case |
 | **1. Extension sniffing** ✅ done | Header capture, MAIN-world manifest + DRM detection, frame association; pass headers via `--add-header` for now | Biggest lever for "works on every embed" |
-| **2. Engine core** | `HttpSegmentedJob` + RetryPolicy + StateFile + watchdog, with a local test server that simulates drops, per-connection throttling and 403 expiry | Fixes the 500 KB/s case on progressive files |
+| **2. Engine core** ✅ done | `HttpSegmentedJob` + RetryPolicy + StateFile + watchdog, with a local test server that simulates drops, per-connection throttling and 403 expiry | Fixes the 500 KB/s case on progressive files |
 | **3. HLS engine** | `HlsJob` + ffmpeg remux; route sniffed HLS through it | Full control of retries/refresh on HLS |
 | **4. Integration** | yt-dlp `-J` → engine for progressive formats (non-YouTube first), RefreshAddress, stream picker UI | Ties it together |
 | **5. Extras** | MSE recording fallback, speed limiter, per-host connection caps | Nice to have |
@@ -171,6 +171,27 @@ Phase 1 as built:
   when nothing resolves on a DRM page.
 - **The bridge** accepts only extension origins or requests with no Origin; web pages are rejected, including the CORS
   preflight. Forwarded header names are allowlisted and CR/LF values are dropped.
+
+Phase 2 as built (`src/main/engine/segmented.ts`):
+- **Dynamic segmentation (IDM-style).** The first connection starts at byte 0 and learns size, range support and ETag. Each
+  free connection takes the second half of the largest unfinished segment; segments are at least 1 MB.
+- **Writing and resume.** Writes go to positions in a sparse, preallocated `.grabby-part` file. A `.grabby-state.json` is
+  written every 2 s, so pause, crash or quit resume byte-exactly. The state is checked against size and ETag, and a
+  changed file starts over.
+- **Errors.**
+  - Each segment retries with backoff (1 s → 30 s).
+  - A 20 s socket-idle timeout catches stalls.
+  - 429/503, or a 403 while sibling connections work, means the host caps connections, so the engine uses one fewer.
+  - A 403 after data has flowed is retried 3 times, then treated as an expired link: the bytes are kept and the queue's
+    backoff resumes later.
+  - After 2 min with no data, the job ends and the queue's retry/backoff takes over.
+- **Hand-off to yt-dlp.** For a block on the first request, HTML instead of media, ranges ignored mid-file, or a file that
+  changed, the item switches to yt-dlp without spending a retry. 404 is fatal.
+- **Routing.** Only Generic-extractor items with exactly one http(s) format go through the engine: sniffed mp4s, direct
+  links and embed hosts. YouTube, HLS/DASH and audio-only stay on yt-dlp. The "Connections per download" setting is
+  1/4/8/16, default 8.
+- **Measured.** On a local host throttled to 500 KB/s per connection, a 32 MB file downloads at 0.49 MB/s with 1
+  connection, **3.9 MB/s with 8** and 7.7 MB/s with 16. The same file through yt-dlp runs at 501 KiB/s.
 
 Each phase ships on its own. yt-dlp stays the fallback throughout, so nothing regresses.
 

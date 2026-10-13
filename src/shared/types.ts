@@ -22,6 +22,17 @@ export interface FormatOption {
   label: string // e.g. "1080p", "Audio only (mp3)"
 }
 
+/**
+ * A single plain HTTP(S) media file (yt-dlp's generic extractor found exactly
+ * one progressive format). Grabby's own multi-connection engine downloads these.
+ */
+export interface DirectSource {
+  url: string
+  /** Headers yt-dlp would send (its UA, plus any --add-header/--referer). */
+  headers?: HttpHeaders
+  ext: string
+}
+
 /** Metadata returned by `yt-dlp -J`. */
 export interface MediaInfo {
   url: string
@@ -39,6 +50,8 @@ export interface MediaInfo {
   bestSize?: number
   /** Estimated bytes for the audio-only selection. */
   audioSize?: number
+  /** Set when this is one plain file the segmented engine can fetch. */
+  direct?: DirectSource
 }
 
 /** Request headers captured from the browser's own request for a stream (name → value). */
@@ -51,6 +64,8 @@ export interface ProgressUpdate {
   eta: string // e.g. "00:42"
   downloaded: string // e.g. "45.2MiB" (current stream)
   total: string // e.g. "142MiB" (current stream; "" if unknown)
+  /** Parallel connections in use (Grabby's engine only). */
+  connections?: number
 }
 
 export interface DownloadItem {
@@ -78,6 +93,12 @@ export interface DownloadItem {
   retryAt?: number
   /** Transient hint shown while downloading, e.g. "Connection lost — retrying (2)". */
   notice?: string
+  /** Plain-file source for Grabby's segmented engine (see DirectSource). */
+  direct?: DirectSource
+  /** The engine couldn't fetch it (blocked, not a file…): use yt-dlp from now on. */
+  useYtdlp?: boolean
+  /** Parallel connections in use (Grabby's engine only). */
+  connections?: number
   /** 'video' (yt-dlp) or 'subtitle' (direct file download). Defaults to 'video'. */
   kind?: 'video' | 'subtitle'
   subExt?: string // subtitle file extension (srt/vtt/…) when kind === 'subtitle'
@@ -131,6 +152,8 @@ export interface AppSettings {
   outputDir: string
   maxConcurrent: number
   cookiesBrowser: CookiesBrowser
+  /** Parallel connections per download for Grabby's engine (1–16). */
+  connections: number
 }
 
 /** The typed API the preload bridge exposes to the renderer as `window.grabby`. */
@@ -141,6 +164,7 @@ export interface DownloadSpec {
   formatLabel: string
   referer?: string
   headers?: HttpHeaders
+  direct?: DirectSource
   /** 'subtitle' downloads the URL as a plain file instead of via yt-dlp. */
   kind?: 'video' | 'subtitle'
   subExt?: string // subtitle extension (srt/vtt/…) when kind === 'subtitle'

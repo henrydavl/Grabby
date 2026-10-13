@@ -88,6 +88,11 @@ export function DownloadRow({ item }: { item: DownloadItem }): React.JSX.Element
               </span>
             )}
             {active && item.speed && <span className="text-slate-500">· {item.speed}</span>}
+            {active && (item.connections ?? 0) > 1 && (
+              <span className="text-slate-500" title="Parallel connections">
+                · {item.connections} conn
+              </span>
+            )}
             {active && item.eta && <span className="text-slate-500">· ETA {item.eta}</span>}
             {item.notice && <span className="text-amber-400">· {item.notice}</span>}
             {retrying && !item.notice && retryIn !== null && (

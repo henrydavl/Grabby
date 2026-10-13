@@ -51,6 +51,7 @@ export const useStore = create<State>((set, get) => ({
         eta: p.eta,
         downloaded: p.downloaded,
         total: p.total,
+        connections: p.connections,
         status: 'downloading'
       }
       return { items: next }
