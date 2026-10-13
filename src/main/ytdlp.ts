@@ -1,9 +1,23 @@
 import { spawn, execFile, ChildProcess } from 'child_process'
-import { existsSync, chmodSync, readdirSync, statSync } from 'fs'
-import { homedir } from 'os'
+import {
+  existsSync,
+  chmodSync,
+  readdirSync,
+  statSync,
+  mkdtempSync,
+  writeFileSync,
+  rmSync
+} from 'fs'
+import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { app } from 'electron'
-import type { CookiesBrowser, FormatKind, MediaInfo, ProgressUpdate } from '../shared/types'
+import type {
+  CookiesBrowser,
+  FormatKind,
+  HttpHeaders,
+  MediaInfo,
+  ProgressUpdate
+} from '../shared/types'
 
 /**
  * Resolve the directory that holds the bundled binaries.
@@ -269,6 +283,86 @@ function refererArgs(referer?: string): string[] {
   return referer ? ['--referer', referer] : []
 }
 
+/** Quote a value for a yt-dlp config file (parsed with shell-like rules). */
+function configQuote(v: string): string {
+  return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+}
+
+interface HeaderConfig {
+  args: string[]
+  /** Captured cookies are in use, so don't also load the browser's cookie jar. */
+  hasCookies: boolean
+  cleanup: () => void
+}
+
+/**
+ * The browser's Cookie header as a Netscape cookies.txt scoped to the URL's
+ * host. yt-dlp ignores a domain-less `--add-header Cookie:` (CVE-2023-35934
+ * hardening), so cookies have to go in through --cookies.
+ */
+function cookieFile(url: string, cookieHeader: string): string | null {
+  let host: string
+  try {
+    host = new URL(url).hostname
+  } catch {
+    return null
+  }
+  const expires = Math.floor(Date.now() / 1000) + 24 * 3600
+  const rows: string[] = []
+  for (const part of cookieHeader.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq <= 0) continue
+    const name = part.slice(0, eq).trim()
+    const value = part.slice(eq + 1).trim()
+    if (name) rows.push([host, 'FALSE', '/', 'FALSE', expires, name, value].join('\t'))
+  }
+  return rows.length ? `# Netscape HTTP Cookie File\n${rows.join('\n')}\n` : null
+}
+
+/**
+ * Turn browser-captured request headers into yt-dlp args. They go through
+ * private temp files (--config-locations / --cookies) rather than the command
+ * line, so cookies and auth tokens don't show up in `ps`. Call cleanup() once
+ * yt-dlp exits.
+ */
+function headerConfig(url: string, headers: HttpHeaders | undefined, referer?: string): HeaderConfig {
+  const lines: string[] = []
+  let cookies: string | null = null
+  let hasReferer = false
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const lower = name.toLowerCase()
+    if (lower === 'cookie') {
+      cookies = cookieFile(url, value)
+      continue
+    }
+    // Generic-extractor requests impersonate Chrome's TLS fingerprint; a Firefox
+    // User-Agent on a Chrome handshake is a classic bot signal, so let
+    // yt-dlp/impersonation pick a consistent UA instead.
+    if (lower === 'user-agent' && /firefox\//i.test(value)) continue
+    if (lower === 'referer') hasReferer = true
+    lines.push(`--add-header ${configQuote(`${name}:${value}`)}`)
+  }
+  const args = hasReferer ? [] : refererArgs(referer)
+  if (lines.length === 0 && !cookies) return { args, hasCookies: false, cleanup: () => {} }
+
+  const dir = mkdtempSync(join(tmpdir(), 'grabby-'))
+  if (lines.length) {
+    const file = join(dir, 'headers.conf')
+    writeFileSync(file, lines.join('\n') + '\n', { mode: 0o600 })
+    args.push('--config-locations', file)
+  }
+  if (cookies) {
+    const file = join(dir, 'cookies.txt')
+    writeFileSync(file, cookies, { mode: 0o600 })
+    args.push('--cookies', file)
+  }
+  return {
+    args,
+    hasCookies: !!cookies,
+    cleanup: () => rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 // Many embed hosts (Doodstream/playmogo, StreamTape, etc.) sit behind Cloudflare's
 // anti-bot, which 403s yt-dlp's default client. Impersonating a real browser's TLS
 // fingerprint (via the bundled curl_cffi) gets past it. Scoped to the generic
@@ -276,17 +370,27 @@ function refererArgs(referer?: string): string[] {
 const IMPERSONATE_ARGS = ['--extractor-args', 'generic:impersonate']
 
 /** Fetch metadata + available formats for a URL (single video or playlist). */
-export async function fetchInfo(url: string, referer?: string): Promise<MediaInfo> {
+export async function fetchInfo(
+  url: string,
+  referer?: string,
+  headers?: HttpHeaders
+): Promise<MediaInfo> {
   // First pass: flat dump so playlists are cheap to detect.
-  const { stdout } = await run([
-    '-J',
-    '--flat-playlist',
-    '--no-warnings',
-    ...cookieArgs(),
-    ...refererArgs(referer),
-    ...IMPERSONATE_ARGS,
-    url
-  ])
+  const hdr = headerConfig(url, headers, referer)
+  let stdout: string
+  try {
+    ;({ stdout } = await run([
+      '-J',
+      '--flat-playlist',
+      '--no-warnings',
+      ...(hdr.hasCookies ? [] : cookieArgs()),
+      ...hdr.args,
+      ...IMPERSONATE_ARGS,
+      url
+    ]))
+  } finally {
+    hdr.cleanup()
+  }
   const info = JSON.parse(stdout) as RawInfo
 
   if (info._type === 'playlist' && info.entries) {
@@ -370,11 +474,13 @@ export function startDownload(opts: {
   outputDir: string
   outputBase: string
   referer?: string
+  headers?: HttpHeaders
   onProgress: (p: ProgressUpdate) => void
   /** Called when yt-dlp hits a transient error and is retrying in-process. */
   onRetry?: (count: number, reason: string) => void
 }): DownloadHandle {
-  const { id, url, format, outputDir, outputBase, referer, onProgress, onRetry } = opts
+  const { id, url, format, outputDir, outputBase, referer, headers, onProgress, onRetry } = opts
+  const hdr = headerConfig(url, headers, referer)
   const args = [
     '--newline',
     // --print (below) implies --quiet, which hides progress and retry notices;
@@ -396,8 +502,8 @@ export function startDownload(opts: {
     'after_move:GBYFILE|%(filepath)s',
     ...formatArgs(format),
     ...ffmpegArgs(),
-    ...cookieArgs(),
-    ...refererArgs(referer),
+    ...(hdr.hasCookies ? [] : cookieArgs()),
+    ...hdr.args,
     ...IMPERSONATE_ARGS,
     url
   ]
@@ -448,6 +554,7 @@ export function startDownload(opts: {
 
   const done = new Promise<DownloadResult>((resolve) => {
     child.on('close', (code) => {
+      hdr.cleanup()
       if (buf.trim()) handleLine(buf)
       if (code !== 0 && code !== null) {
         // Surface the last meaningful stderr line as the error.
@@ -458,7 +565,10 @@ export function startDownload(opts: {
         resolve({ code: code ?? 0, filePath })
       }
     })
-    child.on('error', (err) => resolve({ code: 1, error: err.message }))
+    child.on('error', (err) => {
+      hdr.cleanup()
+      resolve({ code: 1, error: err.message })
+    })
   })
 
   return { child, done }

@@ -4,7 +4,7 @@ import { get as httpGet } from 'http'
 import { get as httpsGet, RequestOptions } from 'https'
 import { URL } from 'url'
 import { sanitizeName } from './ytdlp'
-import type { ProgressUpdate } from '../shared/types'
+import type { HttpHeaders, ProgressUpdate } from '../shared/types'
 import type { DownloadResult } from './ytdlp'
 
 // A plain browser-ish UA + Accept so subtitle CDNs (some behind light bot checks)
@@ -48,9 +48,10 @@ export function startSubtitleDownload(opts: {
   url: string
   destPath: string
   referer?: string
+  headers?: HttpHeaders
   onProgress: (p: ProgressUpdate) => void
 }): SubHandle {
-  const { id, url, destPath, referer, onProgress } = opts
+  const { id, url, destPath, referer, headers, onProgress } = opts
   let aborted = false
   let currentAbort: (() => void) | null = null
   let settle: ((r: DownloadResult) => void) | null = null
@@ -79,7 +80,9 @@ export function startSubtitleDownload(opts: {
         headers: {
           'User-Agent': UA,
           Accept: '*/*',
-          ...(referer ? { Referer: referer } : {})
+          ...(referer ? { Referer: referer } : {}),
+          // The browser's own headers (cookies, exact Referer/UA) win.
+          ...headers
         }
       }
       const req = getter(parsed, options, (res) => {

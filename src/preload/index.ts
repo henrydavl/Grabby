@@ -9,8 +9,8 @@ import type {
 } from '../shared/types'
 
 const api: GrabbyAPI = {
-  fetchInfo: (url, referer) =>
-    ipcRenderer.invoke('fetchInfo', url, referer) as Promise<MediaInfo>,
+  fetchInfo: (url, referer, headers) =>
+    ipcRenderer.invoke('fetchInfo', url, referer, headers) as Promise<MediaInfo>,
   addDownloads: (items) => ipcRenderer.invoke('addDownloads', items) as Promise<DownloadItem[]>,
   pause: (id) => ipcRenderer.invoke('pause', id) as Promise<void>,
   resume: (id) => ipcRenderer.invoke('resume', id) as Promise<void>,

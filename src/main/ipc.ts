@@ -1,5 +1,5 @@
 import { ipcMain, dialog, shell, BrowserWindow } from 'electron'
-import type { AppSettings, DownloadSpec } from '../shared/types'
+import type { AppSettings, DownloadSpec, HttpHeaders } from '../shared/types'
 import { DownloadManager } from './downloadManager'
 import { fetchInfo, updateYtdlp, setCookiesBrowser } from './ytdlp'
 import { loadSettings, saveSettings } from './settings'
@@ -29,7 +29,9 @@ export function registerIpc(getWindow: () => BrowserWindow | null): DownloadMana
     }
   })
 
-  ipcMain.handle('fetchInfo', (_e, url: string, referer?: string) => fetchInfo(url, referer))
+  ipcMain.handle('fetchInfo', (_e, url: string, referer?: string, headers?: HttpHeaders) =>
+    fetchInfo(url, referer, headers)
+  )
 
   ipcMain.handle('addDownloads', (_e, specs: DownloadSpec[]) => manager.add(specs))
 

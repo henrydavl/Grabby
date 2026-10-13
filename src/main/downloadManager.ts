@@ -93,6 +93,7 @@ export class DownloadManager extends EventEmitter {
         format: s.format,
         formatLabel: s.formatLabel,
         referer: s.referer,
+        headers: s.headers,
         status: 'queued',
         percent: 0,
         speed: '',
@@ -239,6 +240,7 @@ export class DownloadManager extends EventEmitter {
       outputDir: item.outputDir,
       outputBase: item.outputBase,
       referer: item.referer,
+      headers: item.headers,
       onProgress: (p: ProgressUpdate) => {
         // Keep the bar monotonic across the video→audio passes.
         const percent = Math.max(rt.maxPercent ?? 0, p.percent)
@@ -284,6 +286,7 @@ export class DownloadManager extends EventEmitter {
       url: item.url,
       destPath,
       referer: item.referer,
+      headers: item.headers,
       onProgress: (p) => {
         this.patch(id, {
           status: 'downloading',

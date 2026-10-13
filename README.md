@@ -22,7 +22,10 @@ everything (yt-dlp, ffmpeg, deno) is bundled, no separate installs:
   pause / resume / cancel; remove from list without deleting the file.
 - **Numbered filenames** — re-downloading the same video adds ` (1)`, ` (2)`… instead of overwriting.
 - **Browser extension** — IDM-style ⬇ button on videos (incl. embedded iframes) + a toolbar button,
-  with network stream sniffing for sites yt-dlp doesn't recognize. See below.
+  with network stream sniffing for sites yt-dlp doesn't recognize. It finds HLS/DASH streams by
+  their content (even under disguised URLs or inside API responses), replays the browser's own
+  cookies/headers so token-gated CDNs accept the download, and tells you plainly when a video is
+  DRM-protected. See below.
 - **Subtitle downloads** — when the extension sniffs a subtitle (`.srt`/`.vtt`/…) the ⬇ button
   becomes a split button whose dropdown offers **Video**, **Subtitle**, or **Video + Subtitle**
   (like IDM). Subtitles download straight to your output folder, named after the video.
@@ -102,13 +105,16 @@ cd extension && ./build.sh   # creates extension/dist/chrome and extension/dist/
 2. Turn on **Developer mode** (top-right)
 3. Click **Load unpacked** → select the unzipped `chrome` folder
 
-**Firefox / Zen**
+**Firefox / Zen** (Firefox 128 or newer)
 1. Open `about:debugging#/runtime/this-firefox`
 2. Click **Load Temporary Add-on…**
 3. Select the `manifest.json` inside the unzipped `firefox` folder
 
 > Firefox/Zen temporary add-ons unload when the browser restarts — reload after each restart
 > (a permanent install requires signing the add-on via Mozilla AMO).
+>
+> **Updating the extension:** after pulling a new version, rebuild and press **Reload** on the
+> extension (Chrome) or re-load the temporary add-on (Firefox), then refresh open video tabs.
 
 Grabby must be **running**: the extension talks to a local bridge on `127.0.0.1:8787`. On a
 supported site, hit play, then click the ⬇ button (or the toolbar icon) and Grabby pops up the

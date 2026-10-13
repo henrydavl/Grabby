@@ -41,6 +41,9 @@ export interface MediaInfo {
   audioSize?: number
 }
 
+/** Request headers captured from the browser's own request for a stream (name → value). */
+export type HttpHeaders = Record<string, string>
+
 export interface ProgressUpdate {
   id: string
   percent: number // 0..100
@@ -67,6 +70,7 @@ export interface DownloadItem {
   outputBase?: string // resolved non-clobbering filename stem (no extension)
   filePath?: string // resolved final path once known
   referer?: string // page URL, needed for sniffed stream downloads
+  headers?: HttpHeaders // browser request headers for sniffed streams (cookies etc.)
   error?: string
   /** Automatic retries used so far (reset when a retry makes progress). */
   attempt?: number
@@ -83,6 +87,8 @@ export interface DownloadItem {
 export interface DownloadCandidate {
   url: string
   referer?: string
+  /** Headers the browser sent for this URL; replayed so token/cookie-gated CDNs accept us. */
+  headers?: HttpHeaders
 }
 
 /** A subtitle file the extension sniffed from network traffic. */
@@ -93,6 +99,7 @@ export interface SubtitleCandidate {
   label?: string
   /** File extension without the dot, e.g. "srt", "vtt". */
   ext?: string
+  headers?: HttpHeaders
 }
 
 /** A download request pushed from the browser extension via the bridge. */
@@ -103,6 +110,8 @@ export interface ExternalRequest {
   subtitles?: SubtitleCandidate[]
   /** What the user chose in the dropdown. 'video' (default), 'subtitle', or 'both'. */
   kind?: 'video' | 'subtitle' | 'both'
+  /** EME key system (e.g. "com.widevine.alpha") if the page played DRM-protected media. */
+  drm?: string
 }
 
 /** Browser yt-dlp pulls cookies from, to satisfy YouTube's bot check. */
@@ -131,13 +140,14 @@ export interface DownloadSpec {
   format: FormatKind
   formatLabel: string
   referer?: string
+  headers?: HttpHeaders
   /** 'subtitle' downloads the URL as a plain file instead of via yt-dlp. */
   kind?: 'video' | 'subtitle'
   subExt?: string // subtitle extension (srt/vtt/…) when kind === 'subtitle'
 }
 
 export interface GrabbyAPI {
-  fetchInfo: (url: string, referer?: string) => Promise<MediaInfo>
+  fetchInfo: (url: string, referer?: string, headers?: HttpHeaders) => Promise<MediaInfo>
   addDownloads: (items: DownloadSpec[]) => Promise<DownloadItem[]>
   pause: (id: string) => Promise<void>
   resume: (id: string) => Promise<void>

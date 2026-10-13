@@ -143,7 +143,7 @@ state files make the resume byte-exact.
 | Phase | Scope | Why first |
 |---|---|---|
 | **0. Quick wins** ✅ done | yt-dlp flags: `--retries infinite --fragment-retries infinite --retry-sleep exp=1:30 --socket-timeout 30 -N 8`. App-level auto-retry with backoff on non-fatal exit (yt-dlp `--continue` resumes). Persist queue. | Fixes "cut off on bad network" now; fixes the HLS latency-bound case |
-| **1. Extension sniffing** | Header capture, MAIN-world manifest + DRM detection, frame association; pass headers via `--add-header` for now | Biggest lever for "works on every embed" |
+| **1. Extension sniffing** ✅ done | Header capture, MAIN-world manifest + DRM detection, frame association; pass headers via `--add-header` for now | Biggest lever for "works on every embed" |
 | **2. Engine core** | `HttpSegmentedJob` + RetryPolicy + StateFile + watchdog, with a local test server that simulates drops, per-connection throttling and 403 expiry | Fixes the 500 KB/s case on progressive files |
 | **3. HLS engine** | `HlsJob` + ffmpeg remux; route sniffed HLS through it | Full control of retries/refresh on HLS |
 | **4. Integration** | yt-dlp `-J` → engine for progressive formats (non-YouTube first), RefreshAddress, stream picker UI | Ties it together |
@@ -155,6 +155,22 @@ In-process retries show as "Connection lost — retrying (n)". When yt-dlp exits
 doesn't use up attempts. The queue persists to `userData/queue.json`, and interrupted downloads return paused.
 Also fixed: the concurrency limit ignored `preparing` items, pause/cancel did nothing while preparing, and canceling a
 subtitle left it stuck. Failed items now have a Retry button.
+
+Phase 1 as built:
+- **`page-hook.js`** (page world, `document_start`, all frames) wraps fetch/XHR. It reports HLS/DASH manifests by body
+  (`#EXTM3U`/`<MPD`), and also manifest URLs inside JSON/text responses. It reports DRM only when `setMediaKeys` attaches
+  keys, because capability probes are common on clear content.
+- **`relay.js`** forwards those findings to the background worker.
+- **The background worker** captures request headers (`onSendHeaders` + `extraHeaders`; Firefox falls back without it). It
+  tags streams with their frame, ranks streams from the clicked frame first (master > other HLS/DASH > media playlist > file),
+  drops `.ts`/`.m4s` segments, and keeps its state in `storage.session` so an MV3 worker restart doesn't lose it.
+- **The app** passes headers to yt-dlp through private temp files. Headers go in a `--config-locations` file. Cookies go in
+  a host-scoped `--cookies` file, because yt-dlp drops a domain-less Cookie header, and captured cookies replace
+  `--cookies-from-browser` for that run. Cookie and Authorization headers are never written to `queue.json`.
+- **The renderer** probes candidates 3 at a time, takes the highest-priority one that resolves, and shows a DRM message
+  when nothing resolves on a DRM page.
+- **The bridge** accepts only extension origins or requests with no Origin; web pages are rejected, including the CORS
+  preflight. Forwarded header names are allowlisted and CR/LF values are dropped.
 
 Each phase ships on its own. yt-dlp stays the fallback throughout, so nothing regresses.
 

@@ -1,5 +1,11 @@
 import { useEffect, useState } from 'react'
-import type { DownloadSpec, FormatKind, MediaInfo, SubtitleCandidate } from '../../../shared/types'
+import type {
+  DownloadCandidate,
+  DownloadSpec,
+  FormatKind,
+  MediaInfo,
+  SubtitleCandidate
+} from '../../../shared/types'
 import { FormatPicker } from './FormatPicker'
 
 /** Build a DownloadSpec for a sniffed subtitle file. */
@@ -17,9 +23,57 @@ function subSpec(sub: SubtitleCandidate, baseTitle?: string): DownloadSpec {
     format: 'best',
     formatLabel: sub.label || 'Subtitle',
     referer: sub.referer,
+    headers: sub.headers,
     kind: 'subtitle',
     subExt: ext
   }
+}
+
+// yt-dlp probes run in parallel, but each is a full Python process, so cap them.
+const PROBE_CONCURRENCY = 3
+
+/**
+ * Probe candidates with yt-dlp a few at a time and return the highest-priority
+ * one that resolves: a slow or failing page URL no longer holds up a working
+ * sniffed stream, yet a working page URL (best quality via site extractors)
+ * still wins over the streams behind it.
+ */
+async function probeInOrder(
+  candidates: DownloadCandidate[]
+): Promise<{ candidate: DownloadCandidate; info: MediaInfo }> {
+  const deferred = candidates.map(() => {
+    let resolve!: (info: MediaInfo) => void
+    let reject!: (e: unknown) => void
+    const promise = new Promise<MediaInfo>((res, rej) => ((resolve = res), (reject = rej)))
+    promise.catch(() => {}) // results we stop waiting for must not surface as unhandled
+    return { promise, resolve, reject }
+  })
+  let next = 0
+  let found = false
+  const worker = async (): Promise<void> => {
+    while (!found && next < candidates.length) {
+      const i = next++
+      const c = candidates[i]
+      try {
+        deferred[i].resolve(await window.grabby.fetchInfo(c.url, c.referer, c.headers))
+      } catch (e) {
+        deferred[i].reject(e)
+      }
+    }
+  }
+  for (let w = 0; w < Math.min(PROBE_CONCURRENCY, candidates.length); w++) void worker()
+
+  let lastErr: unknown = new Error('Nothing to download on this page.')
+  for (let i = 0; i < candidates.length; i++) {
+    try {
+      const info = await deferred[i].promise
+      found = true
+      return { candidate: candidates[i], info }
+    } catch (e) {
+      lastErr = e
+    }
+  }
+  throw lastErr
 }
 
 export function UrlBar(): React.JSX.Element {
@@ -27,8 +81,8 @@ export function UrlBar(): React.JSX.Element {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<MediaInfo | null>(null)
-  // Referer to attach when the resolved source is a sniffed stream URL.
-  const [referer, setReferer] = useState<string | undefined>(undefined)
+  // Referer + browser headers to attach when the resolved source is a sniffed stream URL.
+  const [source, setSource] = useState<Omit<DownloadCandidate, 'url'>>({})
   // Subtitles sniffed alongside a "video + subtitle" request, queued once the
   // user confirms a video quality (so they can be named after the video).
   const [pendingSubs, setPendingSubs] = useState<SubtitleCandidate[]>([])
@@ -37,7 +91,7 @@ export function UrlBar(): React.JSX.Element {
     const trimmed = (target ?? url).trim()
     if (!trimmed) return
     setUrl(trimmed)
-    setReferer(undefined)
+    setSource({})
     setLoading(true)
     setError(null)
     try {
@@ -56,7 +110,7 @@ export function UrlBar(): React.JSX.Element {
   //    until one yields formats, then show the quality picker. For 'both' the
   //    subtitles are held until the user confirms so they're named after the video.
   useEffect(() => {
-    return window.grabby.onExternalRequest(async ({ candidates, subtitles, kind }) => {
+    return window.grabby.onExternalRequest(async ({ candidates, subtitles, kind, drm }) => {
       const subs = subtitles ?? []
       if (kind === 'subtitle') {
         if (subs.length > 0) await window.grabby.addDownloads(subs.map((s) => subSpec(s)))
@@ -66,21 +120,23 @@ export function UrlBar(): React.JSX.Element {
       setUrl(candidates[0]?.url ?? '')
       setLoading(true)
       setError(null)
-      setReferer(undefined)
-      let lastErr: unknown = null
-      for (const candidate of candidates) {
-        try {
-          const result = await window.grabby.fetchInfo(candidate.url, candidate.referer)
-          setUrl(candidate.url)
-          setReferer(candidate.referer)
-          setInfo(result)
-          setLoading(false)
-          return
-        } catch (e) {
-          lastErr = e
-        }
+      setSource({})
+      try {
+        const { candidate, info: result } = await probeInOrder(candidates)
+        setUrl(candidate.url)
+        setSource({ referer: candidate.referer, headers: candidate.headers })
+        setInfo(result)
+      } catch (e) {
+        // The page played DRM-protected media and nothing else resolved: say so
+        // plainly instead of showing yt-dlp's last (misleading) error.
+        setError(
+          drm
+            ? `This video is DRM-protected (${drm}), so it can't be downloaded.`
+            : e instanceof Error
+              ? e.message
+              : 'Could not read that video.'
+        )
       }
-      setError(lastErr instanceof Error ? lastErr.message : 'Could not read that video.')
       setLoading(false)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -90,8 +146,14 @@ export function UrlBar(): React.JSX.Element {
     if (!info) return
     const specs: DownloadSpec[] =
       info.isPlaylist && info.entries
-        ? info.entries.map((e) => ({ url: e.url, title: e.title, format, formatLabel: label, referer }))
-        : [{ url: info.url, title: info.title, format, formatLabel: label, referer }]
+        ? info.entries.map((e) => ({
+            url: e.url,
+            title: e.title,
+            format,
+            formatLabel: label,
+            referer: source.referer
+          }))
+        : [{ url: info.url, title: info.title, format, formatLabel: label, ...source }]
     // Queue any "video + subtitle" subs, named after the (single) video.
     for (const s of pendingSubs) {
       specs.push(subSpec(s, info.isPlaylist ? undefined : info.title))
@@ -99,7 +161,7 @@ export function UrlBar(): React.JSX.Element {
     await window.grabby.addDownloads(specs)
     setInfo(null)
     setUrl('')
-    setReferer(undefined)
+    setSource({})
     setPendingSubs([])
   }
 
