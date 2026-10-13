@@ -1,11 +1,11 @@
 import { createDecipheriv, createHash } from 'crypto'
-import { spawn, type ChildProcess } from 'child_process'
 import { existsSync, promises as fsp } from 'fs'
 import { dirname } from 'path'
 import type { ClientRequest } from 'http'
 import type { HttpHeaders } from '../../shared/types'
 import { EngineError, isAuthError, retryDelay, toEngineError } from './errors'
-import { HttpClient } from './http'
+import { HttpClient, type CookieEntry } from './http'
+import { Remuxer } from './mux'
 import { parseMediaPlaylist, segmentIv, type ByteRange, type MediaPlaylist } from './m3u8'
 import type { EngineProgress, EngineResult } from './segmented'
 
@@ -26,6 +26,8 @@ export interface HlsOptions {
   headers: HttpHeaders
   /** Host the captured Cookie/Authorization belong to (never sent elsewhere). */
   credentialHost: string | null
+  /** Scoped cookies from yt-dlp for this format. */
+  cookies?: CookieEntry[]
   /** Final output path (.mp4); falls back to .mkv if the codecs don't fit MP4. */
   destPath: string
   ffmpeg: string
@@ -94,7 +96,7 @@ export class HlsDownload {
   private sleepers = new Set<() => void>()
   /** Requests currently waiting out a retry backoff. */
   private backingOff = 0
-  private muxChild: ChildProcess | null = null
+  private readonly remuxer: Remuxer
 
   private userStopped = false
   private failure: EngineError | null = null
@@ -104,7 +106,8 @@ export class HlsDownload {
   private speed = 0
 
   constructor(private opts: HlsOptions) {
-    this.http = new HttpClient(opts.headers, opts.credentialHost)
+    this.http = new HttpClient(opts.headers, opts.credentialHost, opts.cookies)
+    this.remuxer = new Remuxer(opts.ffmpeg)
     this.statePath = `${opts.destPath}.grabby-hls.json`
   }
 
@@ -129,7 +132,10 @@ export class HlsDownload {
       if (this.userStopped) throw new EngineError('stopped', 'transient')
       await this.closeFiles()
       this.reportProgress()
-      const filePath = await this.mux()
+      const filePath = await this.remuxer.run(
+        this.tracks.map((t) => t.path),
+        this.opts.destPath.replace(/\.mp4$/i, '')
+      )
       await this.removeTemp()
       return { code: 0, filePath }
     } catch (e) {
@@ -162,7 +168,7 @@ export class HlsDownload {
   private abortAll(): void {
     for (const req of this.inflight) req.destroy()
     for (const wake of this.sleepers) wake()
-    this.muxChild?.kill('SIGTERM')
+    this.remuxer.kill()
   }
 
   /** Record the first unrecoverable error and stop every other worker. */
@@ -351,50 +357,7 @@ export class HlsDownload {
     if (failed && !this.userStopped) throw this.failure ?? failed.reason
   }
 
-  // --- output ----------------------------------------------------------------------------
-
-  private runFfmpeg(args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(this.opts.ffmpeg, ['-hide_banner', '-loglevel', 'error', '-y', ...args], {
-        windowsHide: true
-      })
-      this.muxChild = child
-      let stderr = ''
-      child.stderr?.on('data', (c: Buffer) => (stderr += c.toString()))
-      child.on('error', (e) => reject(e))
-      child.on('close', (code) => {
-        this.muxChild = null
-        if (code === 0) resolve()
-        else reject(new Error(stderr.trim().split('\n').pop() || `ffmpeg exited with ${code}`))
-      })
-    })
-  }
-
-  /** Remux the downloaded track(s) into one file without re-encoding. */
-  private async mux(): Promise<string> {
-    const inputs = this.tracks.flatMap((t) => ['-i', t.path])
-    // Only audio/video: timed-ID3 data streams can't go into MP4.
-    const maps = this.tracks.flatMap((_, i) => ['-map', `${i}:v?`, '-map', `${i}:a?`])
-    const stem = this.opts.destPath.replace(/\.mp4$/i, '')
-    const attempts: [string, string[]][] = [
-      [`${stem}.mp4`, ['-movflags', '+faststart']],
-      [`${stem}.mkv`, []] // codecs MP4 can't carry
-    ]
-    let lastError = ''
-    for (const [out, extra] of attempts) {
-      const tmp = `${stem}.grabby-mux${out.slice(stem.length)}`
-      try {
-        await this.runFfmpeg([...inputs, ...maps, '-c', 'copy', ...extra, tmp])
-        await fsp.rename(tmp, out)
-        return out
-      } catch (e) {
-        await fsp.rm(tmp, { force: true })
-        if (this.userStopped) throw e
-        lastError = e instanceof Error ? e.message : String(e)
-      }
-    }
-    throw new EngineError(`remux failed: ${lastError}`, 'fallback')
-  }
+  // --- files -----------------------------------------------------------------------------
 
   private async closeFiles(): Promise<void> {
     for (const t of this.tracks) {

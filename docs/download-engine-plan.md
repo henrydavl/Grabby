@@ -146,7 +146,7 @@ state files make the resume byte-exact.
 | **1. Extension sniffing** ✅ done | Header capture, MAIN-world manifest + DRM detection, frame association; pass headers via `--add-header` for now | Biggest lever for "works on every embed" |
 | **2. Engine core** ✅ done | `HttpSegmentedJob` + RetryPolicy + StateFile + watchdog, with a local test server that simulates drops, per-connection throttling and 403 expiry | Fixes the 500 KB/s case on progressive files |
 | **3. HLS engine** ✅ done | `HlsJob` + ffmpeg remux; route sniffed HLS through it | Full control of retries/refresh on HLS |
-| **4. Integration** | yt-dlp `-J` → engine for progressive formats (non-YouTube first), RefreshAddress, stream picker UI | Ties it together |
+| **4. Integration** ✅ done | yt-dlp `-J` → engine for progressive formats (non-YouTube first), RefreshAddress, stream picker UI | Ties it together |
 | **5. Extras** | MSE recording fallback, speed limiter, per-host connection caps | Nice to have |
 
 Phase 0 as built: yt-dlp runs with unlimited network retries, exponential backoff, 30 s socket timeout and `-N 8`.
@@ -218,6 +218,30 @@ Phase 3 as built (`src/main/engine/hls.ts`, `m3u8.ts`, shared `http.ts` / `error
 - **Measured against yt-dlp (local tests).** Throughput was the same (15.7 s vs 14.9 s, both with 8 parallel
   fragments). On PNG-disguised segments the engine's file decodes cleanly, while yt-dlp reported success with a broken
   0-second file.
+
+Phase 4 as built:
+- **One routing path** (`engine/route.ts`). Every non-YouTube, non-audio download is resolved by yt-dlp
+  (`-J -f <selector>`) on each start or retry. That gives fresh URLs and cookies, so expiring links renew on every retry.
+  - Plain http(s) formats go to the multi-connection engine. Separate video and audio are downloaded in parallel and
+    merged by the shared `Remuxer` (`engine/progressive.ts`).
+  - HLS goes to the HLS engine.
+  - Everything else goes to yt-dlp without a notice: DASH fragments, chunked or impersonation-only formats, mixed
+    protocols, YouTube.
+  - This replaces Phase 2/3's Generic-only `direct`/`hls` flags. Site extractors (Vimeo, archive.org, …) now benefit too.
+- **Cookies scoped like a browser.** yt-dlp's per-format `cookies` field (`Domain=…; Path=…; Secure`) and captured
+  browser cookies (host-only) are matched per request by domain, path and secure. Authorization is sent only to the
+  captured host.
+- **Refresh download address (IDM-style).** When a sniffed link has failed with 401/403/410 and yt-dlp can't renew it,
+  a new ⬇ click on the same page (same page URL, `#hash` ignored) is matched to that download by stream origin+path, or
+  else host. The download gets the fresh URL and headers and resumes from its bytes instead of opening the picker.
+  Segmented-engine resume state is keyed by origin+path, so a new token query keeps the bytes; size and ETag are still
+  checked. A final failure on an expired sniffed link explains how to refresh it.
+- **Source picker.** Every candidate yt-dlp can read is listed in the quality dialog with host, stream type, height and
+  duration, so an ad or trailer can be swapped for the real video. Late probe results from an older request are ignored.
+- **Measured.**
+  - On real archive.org traffic (25 s sample, same file): engine 121 MiB on 8 connections vs yt-dlp 89 MiB on 1
+    connection, about 36% more.
+  - Locally, an expired playlist link refreshed from the page resumed with 2 of 30 segments re-fetched.
 
 Each phase ships on its own. yt-dlp stays the fallback throughout, so nothing regresses.
 

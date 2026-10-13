@@ -6,6 +6,8 @@ interface Props {
   info: MediaInfo
   onConfirm: (format: FormatKind, label: string) => void
   onCancel: () => void
+  /** Optional control under the title (the source picker for extension requests). */
+  sourcePicker?: React.ReactNode
 }
 
 /** Human-readable, approximate size label (e.g. "~42 MB"). Empty if unknown. */
@@ -21,7 +23,7 @@ function sizeLabel(bytes?: number): string {
   return `~${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}`
 }
 
-export function FormatPicker({ info, onConfirm, onCancel }: Props): React.JSX.Element {
+export function FormatPicker({ info, onConfirm, onCancel, sourcePicker }: Props): React.JSX.Element {
   const options: FormatOption[] = info.isPlaylist
     ? playlistFormatOptions()
     : formatOptionsFor(info.availableHeights)
@@ -56,6 +58,8 @@ export function FormatPicker({ info, onConfirm, onCancel }: Props): React.JSX.El
             </div>
           </div>
         </div>
+
+        {sourcePicker}
 
         <div className="mt-4 space-y-1.5">
           {options.map((opt) => (

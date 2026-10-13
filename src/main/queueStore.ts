@@ -36,11 +36,7 @@ export function saveQueue(items: DownloadItem[]): void {
   try {
     mkdirSync(app.getPath('userData'), { recursive: true })
     const tmp = `${queueFile()}.tmp`
-    const safe = items.map((i) => ({
-      ...i,
-      headers: withoutSecrets(i.headers),
-      direct: i.direct && { ...i.direct, headers: withoutSecrets(i.direct.headers) }
-    }))
+    const safe = items.map((i) => ({ ...i, headers: withoutSecrets(i.headers) }))
     writeFileSync(tmp, JSON.stringify(safe, null, 2))
     renameSync(tmp, queueFile())
   } catch {

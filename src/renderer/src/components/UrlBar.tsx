@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type {
   DownloadCandidate,
   DownloadSpec,
@@ -32,43 +32,49 @@ function subSpec(sub: SubtitleCandidate, baseTitle?: string): DownloadSpec {
 // yt-dlp probes run in parallel, but each is a full Python process, so cap them.
 const PROBE_CONCURRENCY = 3
 
+/** A candidate that yt-dlp could read; `index` is its priority (0 = page URL). */
+interface Source {
+  index: number
+  candidate: DownloadCandidate
+  info: MediaInfo
+}
+
 /**
- * Probe candidates with yt-dlp a few at a time and return the highest-priority
- * one that resolves: a slow or failing page URL no longer holds up a working
- * sniffed stream, yet a working page URL (best quality via site extractors)
- * still wins over the streams behind it.
+ * Probe candidates with yt-dlp a few at a time. Resolves with the
+ * highest-priority one that works — a slow or failing page URL doesn't hold up a
+ * working sniffed stream, yet a working page URL (best quality via site
+ * extractors) still wins. The rest keep probing in the background and are
+ * reported via onFound, so the source picker can offer them (IDM-style).
  */
-async function probeInOrder(
-  candidates: DownloadCandidate[]
-): Promise<{ candidate: DownloadCandidate; info: MediaInfo }> {
+async function probe(candidates: DownloadCandidate[], onFound: (s: Source) => void): Promise<Source> {
   const deferred = candidates.map(() => {
-    let resolve!: (info: MediaInfo) => void
+    let resolve!: (s: Source) => void
     let reject!: (e: unknown) => void
-    const promise = new Promise<MediaInfo>((res, rej) => ((resolve = res), (reject = rej)))
-    promise.catch(() => {}) // results we stop waiting for must not surface as unhandled
+    const promise = new Promise<Source>((res, rej) => ((resolve = res), (reject = rej)))
+    promise.catch(() => {}) // results nobody awaits must not surface as unhandled
     return { promise, resolve, reject }
   })
   let next = 0
-  let found = false
   const worker = async (): Promise<void> => {
-    while (!found && next < candidates.length) {
-      const i = next++
-      const c = candidates[i]
+    while (next < candidates.length) {
+      const index = next++
+      const candidate = candidates[index]
       try {
-        deferred[i].resolve(await window.grabby.fetchInfo(c.url, c.referer, c.headers))
+        const info = await window.grabby.fetchInfo(candidate.url, candidate.referer, candidate.headers)
+        const source = { index, candidate, info }
+        onFound(source)
+        deferred[index].resolve(source)
       } catch (e) {
-        deferred[i].reject(e)
+        deferred[index].reject(e)
       }
     }
   }
   for (let w = 0; w < Math.min(PROBE_CONCURRENCY, candidates.length); w++) void worker()
 
   let lastErr: unknown = new Error('Nothing to download on this page.')
-  for (let i = 0; i < candidates.length; i++) {
+  for (const d of deferred) {
     try {
-      const info = await deferred[i].promise
-      found = true
-      return { candidate: candidates[i], info }
+      return await d.promise
     } catch (e) {
       lastErr = e
     }
@@ -76,13 +82,46 @@ async function probeInOrder(
   throw lastErr
 }
 
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+/** "This page (Vimeo) · 1080p · 12:31" or "cdn.example.com · HLS · 720p · 12:31". */
+function sourceLabel(s: Source, page: string | undefined): string {
+  const { info } = s
+  const parts = [
+    s.candidate.url === page
+      ? `This page${info.extractor && info.extractor !== 'Generic' ? ` (${info.extractor})` : ''}`
+      : hostOf(s.candidate.url)
+  ]
+  if (info.isPlaylist) {
+    parts.push(`playlist of ${info.entries?.length ?? 0}`)
+  } else {
+    if (info.streamType) parts.push(info.streamType)
+    if (info.availableHeights?.[0]) parts.push(`${info.availableHeights[0]}p`)
+    if (info.durationString) parts.push(info.durationString)
+  }
+  return parts.join(' · ')
+}
+
 export function UrlBar(): React.JSX.Element {
   const [url, setUrl] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<MediaInfo | null>(null)
-  // Referer + browser headers to attach when the resolved source is a sniffed stream URL.
-  const [source, setSource] = useState<Omit<DownloadCandidate, 'url'>>({})
+  // Referer + browser headers to attach when the resolved source is a sniffed
+  // stream URL, plus the page it came from (lets a later click refresh it).
+  const [source, setSource] = useState<Omit<DownloadCandidate, 'url'> & { page?: string }>({})
+  // Every candidate of the current extension request that yt-dlp could read.
+  const [sources, setSources] = useState<Source[]>([])
+  const [selected, setSelected] = useState(0)
+  const [page, setPage] = useState<string | undefined>(undefined)
+  // Late probe results from an older request must not leak into a newer one.
+  const requestId = useRef(0)
   // Subtitles sniffed alongside a "video + subtitle" request, queued once the
   // user confirms a video quality (so they can be named after the video).
   const [pendingSubs, setPendingSubs] = useState<SubtitleCandidate[]>([])
@@ -90,8 +129,11 @@ export function UrlBar(): React.JSX.Element {
   const fetch = async (target?: string): Promise<void> => {
     const trimmed = (target ?? url).trim()
     if (!trimmed) return
+    requestId.current++
     setUrl(trimmed)
     setSource({})
+    setSources([])
+    setPage(undefined)
     setLoading(true)
     setError(null)
     try {
@@ -116,17 +158,24 @@ export function UrlBar(): React.JSX.Element {
         if (subs.length > 0) await window.grabby.addDownloads(subs.map((s) => subSpec(s)))
         return
       }
+      const id = ++requestId.current
+      const pageUrl = candidates[0]?.url
       setPendingSubs(kind === 'both' ? subs : [])
-      setUrl(candidates[0]?.url ?? '')
+      setUrl(pageUrl ?? '')
+      setPage(pageUrl)
       setLoading(true)
       setError(null)
       setSource({})
+      setSources([])
       try {
-        const { candidate, info: result } = await probeInOrder(candidates)
-        setUrl(candidate.url)
-        setSource({ referer: candidate.referer, headers: candidate.headers })
-        setInfo(result)
+        const best = await probe(candidates, (found) => {
+          if (requestId.current !== id) return
+          setSources((prev) => [...prev, found].sort((a, b) => a.index - b.index))
+        })
+        if (requestId.current !== id) return
+        choose(best, pageUrl)
       } catch (e) {
+        if (requestId.current !== id) return
         // The page played DRM-protected media and nothing else resolved: say so
         // plainly instead of showing yt-dlp's last (misleading) error.
         setError(
@@ -141,6 +190,19 @@ export function UrlBar(): React.JSX.Element {
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  const choose = (s: Source, pageUrl: string | undefined): void => {
+    setSelected(s.index)
+    setUrl(s.candidate.url)
+    setSource({ referer: s.candidate.referer, headers: s.candidate.headers, page: pageUrl })
+    setInfo(s.info)
+  }
+
+  const close = (): void => {
+    requestId.current++
+    setInfo(null)
+    setSources([])
+  }
 
   const confirm = async (format: FormatKind, label: string): Promise<void> => {
     if (!info) return
@@ -159,9 +221,7 @@ export function UrlBar(): React.JSX.Element {
               title: info.title,
               format,
               formatLabel: label,
-              ...source,
-              direct: info.direct,
-              hls: info.hls
+              ...source
             }
           ]
     // Queue any "video + subtitle" subs, named after the (single) video.
@@ -169,7 +229,7 @@ export function UrlBar(): React.JSX.Element {
       specs.push(subSpec(s, info.isPlaylist ? undefined : info.title))
     }
     await window.grabby.addDownloads(specs)
-    setInfo(null)
+    close()
     setUrl('')
     setSource({})
     setPendingSubs([])
@@ -196,7 +256,37 @@ export function UrlBar(): React.JSX.Element {
       {error && <div className="mt-2 text-xs text-red-400">{error}</div>}
 
       {info && (
-        <FormatPicker info={info} onConfirm={confirm} onCancel={() => setInfo(null)} />
+        <FormatPicker
+          key={selected}
+          info={info}
+          onConfirm={confirm}
+          onCancel={close}
+          sourcePicker={
+            sources.length > 1 && (
+              <div className="mt-4">
+                <label htmlFor="grabby-source" className="block text-xs text-slate-400">
+                  Source{' '}
+                  <span className="text-slate-500">({sources.length} found on this page)</span>
+                </label>
+                <select
+                  id="grabby-source"
+                  value={selected}
+                  onChange={(e) => {
+                    const s = sources.find((x) => x.index === Number(e.target.value))
+                    if (s) choose(s, page)
+                  }}
+                  className="mt-1 w-full rounded-lg border border-edge bg-ink px-3 py-2 text-sm text-slate-200 outline-none focus:border-accent"
+                >
+                  {sources.map((s) => (
+                    <option key={s.index} value={s.index}>
+                      {sourceLabel(s, page)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )
+          }
+        />
       )}
     </div>
   )

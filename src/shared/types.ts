@@ -22,17 +22,6 @@ export interface FormatOption {
   label: string // e.g. "1080p", "Audio only (mp3)"
 }
 
-/**
- * A single plain HTTP(S) media file (yt-dlp's generic extractor found exactly
- * one progressive format). Grabby's own multi-connection engine downloads these.
- */
-export interface DirectSource {
-  url: string
-  /** Headers yt-dlp would send (its UA, plus any --add-header/--referer). */
-  headers?: HttpHeaders
-  ext: string
-}
-
 /** Metadata returned by `yt-dlp -J`. */
 export interface MediaInfo {
   url: string
@@ -50,10 +39,10 @@ export interface MediaInfo {
   bestSize?: number
   /** Estimated bytes for the audio-only selection. */
   audioSize?: number
-  /** Set when this is one plain file the segmented engine can fetch. */
-  direct?: DirectSource
-  /** HLS from the generic extractor: Grabby's HLS engine downloads the variant yt-dlp picks. */
-  hls?: boolean
+  /** yt-dlp extractor that handled it, e.g. "Generic", "Vimeo". */
+  extractor?: string
+  /** Short stream label for the source picker: "HLS", "DASH", "MP4"… */
+  streamType?: string
 }
 
 /** Request headers captured from the browser's own request for a stream (name → value). */
@@ -95,11 +84,9 @@ export interface DownloadItem {
   retryAt?: number
   /** Transient hint shown while downloading, e.g. "Connection lost — retrying (2)". */
   notice?: string
-  /** Plain-file source for Grabby's segmented engine (see DirectSource). */
-  direct?: DirectSource
-  /** Download with Grabby's HLS engine (see MediaInfo.hls). */
-  hls?: boolean
-  /** The engine couldn't fetch it (blocked, not a file…): use yt-dlp from now on. */
+  /** Page the extension sent this from — lets a fresh click there refresh an expired link. */
+  page?: string
+  /** Grabby's engines can't fetch it (blocked, unsupported format…): use yt-dlp from now on. */
   useYtdlp?: boolean
   /** Parallel connections in use (Grabby's engine only). */
   connections?: number
@@ -168,8 +155,8 @@ export interface DownloadSpec {
   formatLabel: string
   referer?: string
   headers?: HttpHeaders
-  direct?: DirectSource
-  hls?: boolean
+  /** Page the extension sent this from (see DownloadItem.page). */
+  page?: string
   /** 'subtitle' downloads the URL as a plain file instead of via yt-dlp. */
   kind?: 'video' | 'subtitle'
   subExt?: string // subtitle extension (srt/vtt/…) when kind === 'subtitle'

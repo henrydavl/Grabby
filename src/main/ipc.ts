@@ -18,14 +18,16 @@ export function registerIpc(getWindow: () => BrowserWindow | null): DownloadMana
 
   // Loopback bridge for the browser extension: bring the window forward and hand
   // the candidate URLs to the renderer, which tries them in order then shows the
-  // format-picker flow.
+  // format-picker flow — unless the request is a fresh link for a download whose
+  // old one expired, which then simply resumes.
   startBridge((reqData) => {
+    const refreshed = manager.refreshFrom(reqData)
     const win = getWindow()
     if (win) {
       if (win.isMinimized()) win.restore()
       win.show()
       win.focus()
-      win.webContents.send('externalRequest', reqData)
+      if (!refreshed) win.webContents.send('externalRequest', reqData)
     }
   })
 

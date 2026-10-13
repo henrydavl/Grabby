@@ -11,9 +11,9 @@ import {
 import { homedir, tmpdir } from 'os'
 import { join } from 'path'
 import { app } from 'electron'
+import type { ResolvedFormat } from './engine/route'
 import type {
   CookiesBrowser,
-  DirectSource,
   FormatKind,
   HttpHeaders,
   MediaInfo,
@@ -244,6 +244,10 @@ interface RawFormat {
   ext?: string
   protocol?: string
   http_headers?: HttpHeaders
+  cookies?: string
+  impersonate?: unknown
+  downloader_options?: { http_chunk_size?: number }
+  fragments?: unknown[]
   height?: number | null
   vcodec?: string | null
   acodec?: string | null
@@ -385,29 +389,6 @@ function headerConfig(url: string, headers: HttpHeaders | undefined, referer?: s
 // extractor so it doesn't change behavior for sites with dedicated extractors.
 const IMPERSONATE_ARGS = ['--extractor-args', 'generic:impersonate']
 
-/**
- * One plain progressive file from the generic extractor (sniffed mp4s, direct
- * links, embed hosts): Grabby's segmented engine can download it with many
- * connections. Site extractors (YouTube etc.) and HLS/DASH stay with yt-dlp.
- */
-function directSource(info: RawInfo): DirectSource | undefined {
-  const formats = info.formats || []
-  if (info.extractor_key !== 'Generic' || formats.length !== 1) return undefined
-  const f = formats[0]
-  if (!f.url || (f.protocol !== 'http' && f.protocol !== 'https')) return undefined
-  return { url: f.url, headers: f.http_headers, ext: f.ext || 'mp4' }
-}
-
-/** HLS from the generic extractor (sniffed .m3u8s, embed hosts): Grabby's HLS engine. */
-function isGenericHls(info: RawInfo): boolean {
-  const formats = info.formats || []
-  return (
-    info.extractor_key === 'Generic' &&
-    formats.length > 0 &&
-    formats.every((f) => (f.protocol || '').startsWith('m3u8'))
-  )
-}
-
 /** Fetch metadata + available formats for a URL (single video or playlist). */
 export async function fetchInfo(
   url: string,
@@ -461,15 +442,17 @@ export async function fetchInfo(
     sizeByHeight,
     bestSize,
     audioSize,
-    direct: directSource(info),
-    hls: isGenericHls(info)
+    extractor: info.extractor_key,
+    streamType: streamType(formats)
   }
 }
 
-export interface ResolvedFormat {
-  url: string
-  protocol: string
-  httpHeaders?: HttpHeaders
+/** Short label for the source picker: HLS, DASH, or the container (MP4, WEBM…). */
+function streamType(formats: RawFormat[]): string | undefined {
+  if (formats.length === 0) return undefined
+  if (formats.every((f) => (f.protocol || '').startsWith('m3u8'))) return 'HLS'
+  if (formats.some((f) => (f.protocol || '').includes('dash'))) return 'DASH'
+  return (formats[formats.length - 1].ext || '').toUpperCase() || undefined
 }
 
 /**
@@ -483,7 +466,7 @@ export async function resolveFormats(
   format: FormatKind,
   referer?: string,
   headers?: HttpHeaders
-): Promise<ResolvedFormat[]> {
+): Promise<{ extractor: string; formats: ResolvedFormat[] }> {
   const hdr = headerConfig(url, headers, referer)
   try {
     const { stdout } = await run([
@@ -496,10 +479,20 @@ export async function resolveFormats(
       ...IMPERSONATE_ARGS,
       url
     ])
-    const info = JSON.parse(stdout) as RawFormat & { requested_formats?: RawFormat[] }
-    return (info.requested_formats ?? [info])
+    const info = JSON.parse(stdout) as RawFormat & RawInfo & { requested_formats?: RawFormat[] }
+    const formats = (info.requested_formats ?? [info])
       .filter((f) => !!f.url)
-      .map((f) => ({ url: f.url!, protocol: f.protocol || '', httpHeaders: f.http_headers }))
+      .map((f) => ({
+        url: f.url!,
+        protocol: f.protocol || '',
+        ext: f.ext || 'mp4',
+        httpHeaders: f.http_headers,
+        cookies: f.cookies,
+        impersonate: !!f.impersonate,
+        chunked: !!f.downloader_options?.http_chunk_size,
+        fragmented: Array.isArray(f.fragments) && f.fragments.length > 0
+      }))
+    return { extractor: info.extractor_key || '', formats }
   } finally {
     hdr.cleanup()
   }
@@ -538,8 +531,10 @@ export interface DownloadResult {
   code: number
   filePath?: string
   error?: string
-  /** Grabby's engine couldn't fetch it; retry the item with yt-dlp. */
+  /** Grabby's engines couldn't fetch it; retry the item with yt-dlp. */
   fallback?: boolean
+  /** The fallback is a routing decision, not a failure: no notice in the UI. */
+  quiet?: boolean
 }
 
 export interface DownloadHandle {

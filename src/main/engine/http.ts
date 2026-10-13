@@ -6,9 +6,69 @@ import { EngineError, httpError, toEngineError } from './errors'
 const STALL_MS = 20_000 // no bytes for this long = dead connection
 const MAX_REDIRECTS = 5
 
-// Browser credentials are only ever sent to the host they were captured for —
-// never to redirect targets or other CDN hosts (as a browser would behave).
-const SCOPED_HEADERS = new Set(['cookie', 'authorization'])
+/** A cookie with the scope a browser would apply to it. */
+export interface CookieEntry {
+  name: string
+  value: string
+  /** Lower-case domain without a leading dot. */
+  domain: string
+  /** Only for exactly `domain` (no subdomains). */
+  hostOnly: boolean
+  path: string
+  secure: boolean
+}
+
+const COOKIE_ATTRIBUTES = new Set(['domain', 'path', 'expires', 'max-age', 'secure', 'httponly', 'samesite'])
+
+/**
+ * Parse yt-dlp's per-format `cookies` field — "a=1; Domain=.x.com; Path=/; b=2;
+ * Domain=…" — into scoped entries. Attributes follow the cookie they belong to.
+ */
+export function parseYtdlpCookies(field: string | undefined): CookieEntry[] {
+  const out: CookieEntry[] = []
+  for (const part of (field ?? '').split(';')) {
+    const eq = part.indexOf('=')
+    const name = (eq >= 0 ? part.slice(0, eq) : part).trim()
+    const value = eq >= 0 ? part.slice(eq + 1).trim() : ''
+    if (!name) continue
+    const attr = name.toLowerCase()
+    const current = out[out.length - 1]
+    if (COOKIE_ATTRIBUTES.has(attr)) {
+      if (!current) continue
+      if (attr === 'domain' && value) {
+        current.hostOnly = !value.startsWith('.')
+        current.domain = value.replace(/^\./, '').toLowerCase()
+      } else if (attr === 'path' && value) current.path = value
+      else if (attr === 'secure') current.secure = true
+      continue
+    }
+    out.push({ name, value, domain: '', hostOnly: false, path: '/', secure: false })
+  }
+  return out.filter((c) => c.domain)
+}
+
+/** A browser-captured `Cookie:` header: host-only cookies for the host it was sent to. */
+export function cookiesFromHeader(header: string | undefined, host: string | null): CookieEntry[] {
+  if (!header || !host) return []
+  return header
+    .split(';')
+    .map((p) => p.trim())
+    .filter((p) => p.indexOf('=') > 0)
+    .map((p) => ({
+      name: p.slice(0, p.indexOf('=')).trim(),
+      value: p.slice(p.indexOf('=') + 1).trim(),
+      domain: host.toLowerCase(),
+      hostOnly: true,
+      path: '/',
+      secure: false
+    }))
+}
+
+function cookieMatches(c: CookieEntry, u: URL): boolean {
+  const host = u.hostname.toLowerCase()
+  const domainOk = c.hostOnly ? host === c.domain : host === c.domain || host.endsWith(`.${c.domain}`)
+  return domainOk && u.pathname.startsWith(c.path) && (!c.secure || u.protocol === 'https:')
+}
 
 /** Hostname of a URL, or null if it doesn't parse. */
 export function hostOf(url: string): string | null {
@@ -19,19 +79,31 @@ export function hostOf(url: string): string | null {
   }
 }
 
-/** Keep-alive HTTP(S) client shared by one download's connections. */
+/**
+ * Keep-alive HTTP(S) client shared by one download's connections. Credentials
+ * are scoped the way a browser scopes them: cookies by domain/path/secure, and
+ * Authorization only to the host it was captured for — never to redirect
+ * targets or unrelated CDN hosts.
+ */
 export class HttpClient {
   private readonly httpAgent = new HttpAgent({ keepAlive: true, maxSockets: 32 })
   private readonly httpsAgent = new HttpsAgent({ keepAlive: true, maxSockets: 32 })
+  private readonly cookies: CookieEntry[]
 
   /**
-   * @param credentialHost host the Cookie/Authorization headers belong to; they
-   *   are dropped for every other host (null: never send them).
+   * @param credentialHost host the captured Cookie/Authorization headers were
+   *   sent to (null: never send them).
+   * @param cookies extra scoped cookies (e.g. yt-dlp's for the format).
    */
   constructor(
     private readonly headers: HttpHeaders,
-    private readonly credentialHost: string | null
-  ) {}
+    private readonly credentialHost: string | null,
+    cookies: CookieEntry[] = []
+  ) {
+    const captured = Object.entries(headers).find(([n]) => n.toLowerCase() === 'cookie')?.[1]
+    // Captured browser cookies win over same-named ones from yt-dlp.
+    this.cookies = [...cookiesFromHeader(captured, credentialHost), ...cookies]
+  }
 
   destroy(): void {
     this.httpAgent.destroy()
@@ -42,10 +114,13 @@ export class HttpClient {
     const out: Record<string, string> = {}
     for (const [name, value] of Object.entries(this.headers)) {
       const lower = name.toLowerCase()
-      if (lower === 'host' || lower === 'accept-encoding' || lower === 'range') continue
-      if (SCOPED_HEADERS.has(lower) && u.hostname !== this.credentialHost) continue
+      if (lower === 'host' || lower === 'accept-encoding' || lower === 'range' || lower === 'cookie') continue
+      if (lower === 'authorization' && u.hostname !== this.credentialHost) continue
       out[name] = value
     }
+    const seen = new Set<string>()
+    const jar = this.cookies.filter((c) => cookieMatches(c, u) && !seen.has(c.name) && seen.add(c.name))
+    if (jar.length) out.Cookie = jar.map((c) => `${c.name}=${c.value}`).join('; ')
     // Byte ranges must refer to the raw file, never a compressed stream.
     out['Accept-Encoding'] = 'identity'
     if (range) out.Range = range

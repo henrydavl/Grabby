@@ -3,7 +3,7 @@ import { existsSync, promises as fsp } from 'fs'
 import { dirname } from 'path'
 import type { HttpHeaders } from '../../shared/types'
 import { EngineError, httpError, isAuthError, retryDelay, toEngineError } from './errors'
-import { HttpClient } from './http'
+import { HttpClient, type CookieEntry } from './http'
 
 /**
  * Grabby's own multi-connection HTTP downloader, modelled on IDM's "dynamic
@@ -42,6 +42,8 @@ export interface SegmentedOptions {
   headers: HttpHeaders
   /** Host the captured Cookie/Authorization belong to (never sent elsewhere). */
   credentialHost: string | null
+  /** Scoped cookies from yt-dlp for this format. */
+  cookies?: CookieEntry[]
   /** Final path; work happens in `${destPath}.grabby-part` + `.grabby-state.json`. */
   destPath: string
   /** Max parallel connections (1 disables splitting). */
@@ -75,6 +77,15 @@ const STATE_INTERVAL_MS = 2_000
 const PROGRESS_INTERVAL_MS = 500
 const AUTH_RETRIES = 3 // 403s after data flowed, before calling the link expired
 
+function resourceKey(url: string): string {
+  try {
+    const u = new URL(url)
+    return u.origin + u.pathname
+  } catch {
+    return url
+  }
+}
+
 export class SegmentedDownload {
   private readonly partPath: string
   private readonly statePath: string
@@ -103,7 +114,7 @@ export class SegmentedDownload {
     this.partPath = `${opts.destPath}.grabby-part`
     this.statePath = `${opts.destPath}.grabby-state.json`
     this.maxConns = Math.max(1, Math.floor(opts.connections))
-    this.http = new HttpClient(opts.headers, opts.credentialHost)
+    this.http = new HttpClient(opts.headers, opts.credentialHost, opts.cookies)
   }
 
   /** Abort all connections; run() resolves with the state saved for a later resume. */
@@ -206,7 +217,9 @@ export class SegmentedDownload {
   private async loadState(): Promise<SavedState | null> {
     try {
       const s = JSON.parse(await fsp.readFile(this.statePath, 'utf-8')) as SavedState
-      return s.version === 1 && s.url === this.opts.url && s.size > 0 ? s : null
+      // Same resource even if its token/query changed (a refreshed link); the
+      // first response re-checks size + ETag before any byte is reused.
+      return s.version === 1 && resourceKey(s.url) === resourceKey(this.opts.url) && s.size > 0 ? s : null
     } catch {
       return null
     }

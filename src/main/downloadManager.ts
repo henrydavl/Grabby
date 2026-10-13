@@ -9,6 +9,7 @@ import {
   type DownloadItem,
   type DownloadSpec,
   type DownloadStatus,
+  type ExternalRequest,
   type ProgressUpdate
 } from '../shared/types'
 import {
@@ -21,10 +22,12 @@ import {
 import { startSubtitleDownload, resolveSubtitlePath, subtitleExtFromUrl } from './subs'
 import { isRetryable, retryDelayMs } from './retryPolicy'
 import { saveQueue } from './queueStore'
-import { SegmentedDownload, type EngineProgress } from './engine/segmented'
+import type { EngineProgress } from './engine/segmented'
 import { HlsDownload } from './engine/hls'
+import { ProgressiveDownload } from './engine/progressive'
 import { formatBytes, formatEta } from './engine/format'
-import { hostOf } from './engine/http'
+import { hostOf, parseYtdlpCookies } from './engine/http'
+import { isYouTubeUrl, routeFor, type ResolvedFormat } from './engine/route'
 
 interface Runtime {
   child?: ChildProcess
@@ -43,6 +46,36 @@ interface Runtime {
 
 // Statuses that occupy a concurrency slot (a process/request is running).
 const RUNNING: DownloadStatus[] = ['preparing', 'downloading']
+
+/** 401/403/410 or an explicit expiry: the link (token, cookies) is no longer valid. */
+function looksExpired(error: string | undefined): boolean {
+  return !!error && /HTTP Error (401|403|410)|expired|Forbidden/i.test(error)
+}
+
+function withoutHash(url: string): string {
+  try {
+    const u = new URL(url)
+    u.hash = ''
+    return u.href.replace(/\/$/, '')
+  } catch {
+    return url
+  }
+}
+
+function samePage(a: string, b: string): boolean {
+  return withoutHash(a) === withoutHash(b)
+}
+
+/** Same file even if its token/query changed. */
+function sameResource(a: string, b: string): boolean {
+  try {
+    const x = new URL(a)
+    const y = new URL(b)
+    return x.origin === y.origin && x.pathname === y.pathname
+  } catch {
+    return false
+  }
+}
 
 // How often to re-check connectivity while a retry waits for the network.
 const OFFLINE_POLL_MS = 5_000
@@ -105,8 +138,7 @@ export class DownloadManager extends EventEmitter {
         formatLabel: s.formatLabel,
         referer: s.referer,
         headers: s.headers,
-        direct: s.direct,
-        hls: s.hls,
+        page: s.page,
         status: 'queued',
         percent: 0,
         speed: '',
@@ -181,6 +213,43 @@ export class DownloadManager extends EventEmitter {
   }
 
   /**
+   * IDM's "refresh download address": when the extension sends a request from
+   * the page of a download whose sniffed link expired, give that download the
+   * fresh link (and cookies) instead of starting a new one — it resumes from
+   * the bytes it already has. Returns the refreshed item, or null if none matched.
+   */
+  refreshFrom(req: ExternalRequest): DownloadItem | null {
+    if (req.kind === 'subtitle') return null
+    const page = req.candidates[0]?.url
+    if (!page) return null
+    const streams = req.candidates.slice(1)
+    for (const item of this.list()) {
+      const waiting = item.status === 'error' || item.status === 'retrying'
+      if (!waiting || item.kind === 'subtitle' || !looksExpired(item.error)) continue
+      if (!item.page || !samePage(item.page, page) || item.url === item.page) continue
+      const fresh =
+        streams.find((c) => sameResource(c.url, item.url)) ??
+        streams.find((c) => hostOf(c.url) === hostOf(item.url))
+      if (!fresh) continue
+      const rt = this.runtime.get(item.id)
+      if (rt) this.clearRetry(rt)
+      this.patch(item.id, {
+        url: fresh.url,
+        headers: fresh.headers,
+        referer: fresh.referer ?? item.referer,
+        status: 'queued',
+        attempt: 0,
+        retryAt: undefined,
+        error: undefined,
+        notice: 'Link refreshed from the browser — resuming'
+      })
+      this.pump()
+      return this.items.get(item.id) ?? null
+    }
+    return null
+  }
+
+  /**
    * App is quitting: stop every running process (they would otherwise keep
    * writing to the same .part files after a relaunch) and save the queue with
    * those items marked paused.
@@ -226,11 +295,12 @@ export class DownloadManager extends EventEmitter {
       this.startSubtitle(id)
       return
     }
-    // Plain files go through Grabby's multi-connection engine; audio-only needs
-    // yt-dlp's conversion, and anything the engine couldn't fetch stays on yt-dlp.
-    if (item.format !== 'audio' && !item.useYtdlp) {
-      if (item.direct) return this.startEngine(id)
-      if (item.hls) return this.startHls(id)
+    // Everything except YouTube (already at line speed via yt-dlp) and audio-only
+    // (needs yt-dlp's mp3 conversion) is resolved first and, where the formats
+    // allow, transferred by Grabby's own engines.
+    if (item.format !== 'audio' && !item.useYtdlp && !isYouTubeUrl(item.url)) {
+      this.startResolved(id)
+      return
     }
 
     // "preparing" = process started but no progress yet (metadata extraction +
@@ -289,56 +359,13 @@ export class DownloadManager extends EventEmitter {
     })
   }
 
-  /** Download a plain media file with Grabby's segmented, multi-connection engine. */
-  private startEngine(id: string): void {
-    const item = this.items.get(id)
-    const rt = this.runtime.get(id)
-    if (!item || !rt || !item.direct) return
-    const { direct } = item
-
-    if (!item.outputBase) {
-      item.outputBase = resolveOutputBase(item.outputDir, item.title, item.format, direct.ext)
-    }
-    this.patch(id, {
-      status: 'preparing',
-      percent: 0,
-      speed: '',
-      eta: '',
-      notice: undefined,
-      retryAt: undefined,
-      error: undefined,
-      connections: undefined
-    })
-
-    const job = new SegmentedDownload({
-      url: direct.url,
-      // yt-dlp's request headers, then the browser's own (cookies, exact
-      // Referer/UA) on top.
-      headers: {
-        ...(item.referer ? { Referer: item.referer } : {}),
-        ...direct.headers,
-        ...item.headers
-      },
-      // The browser's cookies were captured for the sniffed URL's host only.
-      credentialHost: hostOf(item.url),
-      destPath: join(item.outputDir, `${item.outputBase}.${direct.ext}`),
-      connections: this.settings.connections,
-      onProgress: (p) => this.engineProgress(id, p)
-    })
-    rt.abort = () => job.stop()
-
-    job.run().then((res) => {
-      rt.abort = undefined
-      this.settle(id, res)
-    })
-  }
-
   /**
-   * HLS with Grabby's engine: yt-dlp resolves the chosen quality into media
-   * playlist URL(s) — fresh tokens on every start — then the engine downloads
-   * and remuxes them. Anything that isn't plain HLS goes back to yt-dlp.
+   * Resolve with yt-dlp (fresh URLs + cookies on every start, so expiring links
+   * renew on each retry), then transfer with Grabby's engines: plain http(s)
+   * formats with the multi-connection engine (separate video + audio merged),
+   * HLS with the HLS engine. Anything else is handed to yt-dlp.
    */
-  private startHls(id: string): void {
+  private startResolved(id: string): void {
     const item = this.items.get(id)
     const rt = this.runtime.get(id)
     if (!item || !rt) return
@@ -358,33 +385,55 @@ export class DownloadManager extends EventEmitter {
     })
 
     let stopped = false
-    let job: HlsDownload | null = null
+    let job: { stop: () => void } | null = null
     rt.abort = () => {
       stopped = true
       job?.stop()
     }
 
+    const stem = join(item.outputDir, item.outputBase)
+    // yt-dlp's request headers, then the browser's own (cookies, exact Referer/UA) on top.
+    const headersFor = (f: ResolvedFormat): Record<string, string> => ({
+      ...(item.referer ? { Referer: item.referer } : {}),
+      ...f.httpHeaders,
+      ...item.headers
+    })
+    const common = {
+      // The browser's cookies were captured for the sniffed URL's host only.
+      credentialHost: hostOf(item.url),
+      ffmpeg: ffmpegBinary(),
+      connections: this.settings.connections,
+      onProgress: (p: EngineProgress) => this.engineProgress(id, p)
+    }
+
     const run = async (): Promise<DownloadResult> => {
-      const formats = await resolveFormats(item.url, item.format, item.referer, item.headers)
+      const { extractor, formats } = await resolveFormats(item.url, item.format, item.referer, item.headers)
       if (stopped) return { code: 1, error: 'stopped' }
-      if (formats.length === 0 || !formats.every((f) => f.protocol.startsWith('m3u8'))) {
-        return { code: 1, error: 'not an HLS stream', fallback: true }
+      const route = routeFor(extractor, formats)
+      if (route.kind === 'ytdlp') return { code: 1, error: route.reason, fallback: true, quiet: true }
+      if (route.kind === 'hls') {
+        const hls = new HlsDownload({
+          ...common,
+          tracks: route.formats.map((f) => f.url),
+          headers: headersFor(route.formats[0]),
+          cookies: parseYtdlpCookies(route.formats[0].cookies),
+          destPath: `${stem}.mp4`
+        })
+        job = hls
+        return hls.run()
       }
-      job = new HlsDownload({
-        tracks: formats.map((f) => f.url),
-        // yt-dlp's request headers, then the browser's own (cookies, exact Referer/UA) on top.
-        headers: {
-          ...(item.referer ? { Referer: item.referer } : {}),
-          ...formats[0].httpHeaders,
-          ...item.headers
-        },
-        credentialHost: hostOf(item.url),
-        destPath: join(item.outputDir, `${item.outputBase}.mp4`),
-        ffmpeg: ffmpegBinary(),
-        connections: this.settings.connections,
-        onProgress: (p) => this.engineProgress(id, p)
+      const progressive = new ProgressiveDownload({
+        ...common,
+        tracks: route.formats.map((f) => ({
+          url: f.url,
+          ext: f.ext,
+          headers: headersFor(f),
+          cookies: parseYtdlpCookies(f.cookies)
+        })),
+        destStem: stem
       })
-      return job.run()
+      job = progressive
+      return progressive.run()
     }
 
     run()
@@ -476,13 +525,23 @@ export class DownloadManager extends EventEmitter {
     } else if (res.code === 0) {
       this.patch(id, { status: 'completed', percent: 100, ...idle, filePath: res.filePath })
     } else if (res.fallback) {
-      // Our engine can't fetch this one (blocked, not a plain file…): hand it to
-      // yt-dlp right away, without spending a retry attempt.
-      this.patch(id, { status: 'queued', useYtdlp: true, ...idle, notice: 'Switching to yt-dlp…' })
+      // Our engines can't (or shouldn't) fetch this one: hand it to yt-dlp right
+      // away, without spending a retry attempt.
+      this.patch(id, {
+        status: 'queued',
+        useYtdlp: true,
+        ...idle,
+        notice: res.quiet ? undefined : 'Switching to yt-dlp…'
+      })
     } else if (isRetryable(res.error) && (item.attempt ?? 0) < MAX_AUTO_RETRIES) {
       this.scheduleRetry(id, res.error)
     } else {
-      this.patch(id, { status: 'error', ...idle, retryAt: undefined, error: res.error })
+      // A sniffed link that expired can only be renewed from the browser.
+      const hint =
+        looksExpired(res.error) && item.page && item.url !== item.page
+          ? ' — the link expired: play the video on its page and click Grabby’s ⬇ again to resume'
+          : ''
+      this.patch(id, { status: 'error', ...idle, retryAt: undefined, error: `${res.error ?? 'failed'}${hint}` })
     }
     this.pump()
   }
