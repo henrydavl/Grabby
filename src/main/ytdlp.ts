@@ -321,6 +321,29 @@ export async function fetchInfo(url: string, referer?: string): Promise<MediaInf
   }
 }
 
+// Ride out flaky networks inside a single yt-dlp run: unlimited retries for
+// transient errors (4xx still fail fast), exponential backoff capped at 30s, and a
+// socket timeout so a dead connection is noticed. -N fetches HLS/DASH fragments
+// in parallel, which matters on high-latency CDNs with small segments.
+const RESILIENCE_ARGS = [
+  '--retries',
+  'infinite',
+  '--fragment-retries',
+  'infinite',
+  '--retry-sleep',
+  'exp=1:30',
+  '--retry-sleep',
+  'fragment:exp=1:30',
+  '--socket-timeout',
+  '30',
+  '--concurrent-fragments',
+  '8'
+]
+
+// yt-dlp's in-process retry notice, e.g.
+// "[download] Got error: 3145728 bytes read, 22020096 more expected. Retrying (1/inf)..."
+const RETRY_LINE = /Got error: (.+?)\. Retrying.*?\((\d+)\/\w+\)/
+
 const PROGRESS_TEMPLATE =
   'download:GBY|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s' +
   '|%(progress._downloaded_bytes_str)s|%(progress._total_bytes_str)s|%(progress._total_bytes_estimate_str)s'
@@ -348,18 +371,22 @@ export function startDownload(opts: {
   outputBase: string
   referer?: string
   onProgress: (p: ProgressUpdate) => void
+  /** Called when yt-dlp hits a transient error and is retrying in-process. */
+  onRetry?: (count: number, reason: string) => void
 }): DownloadHandle {
-  const { id, url, format, outputDir, outputBase, referer, onProgress } = opts
+  const { id, url, format, outputDir, outputBase, referer, onProgress, onRetry } = opts
   const args = [
     '--newline',
-    // --print (below) implies --quiet, which suppresses progress; --progress
-    // forces the progress lines to be emitted anyway.
+    // --print (below) implies --quiet, which hides progress and retry notices;
+    // --progress and --no-quiet bring them back.
     '--progress',
+    '--no-quiet',
     '--no-warnings',
     '--progress-template',
     PROGRESS_TEMPLATE,
     '--continue',
     '--no-mtime',
+    ...RESILIENCE_ARGS,
     '-P',
     outputDir,
     '-o',
@@ -398,6 +425,9 @@ export function startDownload(opts: {
       })
     } else if (t.startsWith('GBYFILE|')) {
       filePath = t.slice('GBYFILE|'.length)
+    } else if (onRetry) {
+      const m = t.match(RETRY_LINE)
+      if (m) onRetry(Number(m[2]), m[1])
     }
   }
 

@@ -91,6 +91,8 @@ if (!gotLock) {
     const manager = registerIpc(() => mainWindow)
     createWindow()
     tray = createTray(() => mainWindow, manager)
+    // Stop yt-dlp children and save the queue so downloads resume after relaunch.
+    app.on('before-quit', () => manager.shutdown())
 
     app.on('activate', () => {
       // Dock/tray click: re-create the window if it was closed, else reveal it.

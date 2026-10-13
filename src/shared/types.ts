@@ -5,6 +5,7 @@ export type DownloadStatus =
   | 'fetching'
   | 'preparing'
   | 'downloading'
+  | 'retrying' // failed with a transient error; waiting to auto-retry
   | 'paused'
   | 'completed'
   | 'error'
@@ -12,6 +13,9 @@ export type DownloadStatus =
 
 /** A user-facing quality choice that maps to a yt-dlp format selector. */
 export type FormatKind = 'best' | '2160' | '1440' | '1080' | '720' | '480' | 'audio'
+
+/** How many times a download is automatically re-run after a transient failure. */
+export const MAX_AUTO_RETRIES = 8
 
 export interface FormatOption {
   kind: FormatKind
@@ -64,6 +68,12 @@ export interface DownloadItem {
   filePath?: string // resolved final path once known
   referer?: string // page URL, needed for sniffed stream downloads
   error?: string
+  /** Automatic retries used so far (reset when a retry makes progress). */
+  attempt?: number
+  /** Epoch ms of the next automatic retry while status === 'retrying'. */
+  retryAt?: number
+  /** Transient hint shown while downloading, e.g. "Connection lost — retrying (2)". */
+  notice?: string
   /** 'video' (yt-dlp) or 'subtitle' (direct file download). Defaults to 'video'. */
   kind?: 'video' | 'subtitle'
   subExt?: string // subtitle file extension (srt/vtt/…) when kind === 'subtitle'

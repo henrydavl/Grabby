@@ -1,10 +1,12 @@
-import type { DownloadItem, DownloadStatus } from '../../../shared/types'
+import { useEffect, useState } from 'react'
+import { MAX_AUTO_RETRIES, type DownloadItem, type DownloadStatus } from '../../../shared/types'
 
 const STATUS_LABEL: Record<DownloadStatus, string> = {
   queued: 'Queued',
   fetching: 'Reading…',
   preparing: 'Preparing…',
   downloading: 'Downloading',
+  retrying: 'Retrying',
   paused: 'Paused',
   completed: 'Done',
   error: 'Failed',
@@ -16,10 +18,23 @@ const STATUS_COLOR: Record<DownloadStatus, string> = {
   fetching: 'text-slate-400',
   preparing: 'text-sky-400',
   downloading: 'text-accent',
+  retrying: 'text-amber-400',
   paused: 'text-amber-400',
   completed: 'text-emerald-400',
   error: 'text-red-400',
   canceled: 'text-slate-500'
+}
+
+/** Whole seconds until `ts` (epoch ms), ticking once a second; null when unset. */
+function useSecondsUntil(ts?: number): number | null {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    if (!ts) return
+    setNow(Date.now())
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [ts])
+  return ts ? Math.max(0, Math.ceil((ts - now) / 1000)) : null
 }
 
 function IconBtn({
@@ -46,7 +61,10 @@ export function DownloadRow({ item }: { item: DownloadItem }): React.JSX.Element
   const g = window.grabby
   const active = item.status === 'downloading'
   const preparing = item.status === 'preparing'
-  const showBar = active || preparing || item.status === 'paused' || item.status === 'completed'
+  const retrying = item.status === 'retrying'
+  const retryIn = useSecondsUntil(retrying ? item.retryAt : undefined)
+  const showBar =
+    active || preparing || retrying || item.status === 'paused' || item.status === 'completed'
 
   return (
     <div className="rounded-lg border border-edge bg-panel px-4 py-3">
@@ -71,20 +89,40 @@ export function DownloadRow({ item }: { item: DownloadItem }): React.JSX.Element
             )}
             {active && item.speed && <span className="text-slate-500">· {item.speed}</span>}
             {active && item.eta && <span className="text-slate-500">· ETA {item.eta}</span>}
+            {item.notice && <span className="text-amber-400">· {item.notice}</span>}
+            {retrying && !item.notice && retryIn !== null && (
+              <span className="text-slate-500">
+                · in {retryIn}s (attempt {item.attempt}/{MAX_AUTO_RETRIES})
+              </span>
+            )}
           </div>
-          {item.status === 'error' && item.error && (
-            <div className="mt-1 truncate text-xs text-red-400/80" title={item.error}>
+          {(item.status === 'error' || retrying) && item.error && (
+            <div
+              className={`mt-1 truncate text-xs ${retrying ? 'text-amber-400/70' : 'text-red-400/80'}`}
+              title={item.error}
+            >
               {item.error}
             </div>
           )}
         </div>
 
         <div className="flex flex-shrink-0 items-center gap-1">
-          {active && <IconBtn label="Pause" onClick={() => g.pause(item.id)}>⏸</IconBtn>}
+          {(active || preparing) && (
+            <IconBtn label="Pause" onClick={() => g.pause(item.id)}>⏸</IconBtn>
+          )}
           {item.status === 'paused' && (
             <IconBtn label="Resume" onClick={() => g.resume(item.id)}>▶</IconBtn>
           )}
-          {(active || preparing || item.status === 'queued' || item.status === 'paused') && (
+          {(retrying || item.status === 'error') && (
+            <IconBtn label={retrying ? 'Retry now' : 'Retry'} onClick={() => g.resume(item.id)}>
+              ↻
+            </IconBtn>
+          )}
+          {(active ||
+            preparing ||
+            retrying ||
+            item.status === 'queued' ||
+            item.status === 'paused') && (
             <IconBtn label="Cancel" onClick={() => g.cancel(item.id)}>✕</IconBtn>
           )}
           {item.status === 'completed' && (

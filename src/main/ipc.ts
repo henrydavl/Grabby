@@ -4,11 +4,12 @@ import { DownloadManager } from './downloadManager'
 import { fetchInfo, updateYtdlp, setCookiesBrowser } from './ytdlp'
 import { loadSettings, saveSettings } from './settings'
 import { startBridge } from './bridge'
+import { loadQueue } from './queueStore'
 
 export function registerIpc(getWindow: () => BrowserWindow | null): DownloadManager {
   let settings = loadSettings()
   setCookiesBrowser(settings.cookiesBrowser)
-  const manager = new DownloadManager(settings)
+  const manager = new DownloadManager(settings, loadQueue())
 
   // Forward manager events to the renderer.
   manager.on('progress', (p) => getWindow()?.webContents.send('progress', p))

@@ -53,6 +53,7 @@ export function startSubtitleDownload(opts: {
   const { id, url, destPath, referer, onProgress } = opts
   let aborted = false
   let currentAbort: (() => void) | null = null
+  let settle: ((r: DownloadResult) => void) | null = null
 
   const fmt = (n: number): string => {
     if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}MiB`
@@ -61,6 +62,7 @@ export function startSubtitleDownload(opts: {
   }
 
   const done = new Promise<DownloadResult>((resolve) => {
+    settle = resolve
     const fail = (msg: string): void => resolve({ code: 1, error: msg })
 
     const request = (target: string, redirects: number): void => {
@@ -144,6 +146,9 @@ export function startSubtitleDownload(opts: {
     abort: (): void => {
       aborted = true
       currentAbort?.()
+      // The request's own handlers ignore errors once aborted, so settle here or
+      // the caller would wait forever.
+      settle?.({ code: 1, error: 'aborted' })
     },
     done
   }

@@ -1,14 +1,19 @@
 import { randomUUID } from 'crypto'
 import { EventEmitter } from 'events'
 import type { ChildProcess } from 'child_process'
-import type {
-  AppSettings,
-  DownloadItem,
-  DownloadSpec,
-  ProgressUpdate
+import { net } from 'electron'
+import {
+  MAX_AUTO_RETRIES,
+  type AppSettings,
+  type DownloadItem,
+  type DownloadSpec,
+  type DownloadStatus,
+  type ProgressUpdate
 } from '../shared/types'
-import { startDownload, resolveOutputBase } from './ytdlp'
+import { startDownload, resolveOutputBase, type DownloadResult } from './ytdlp'
 import { startSubtitleDownload, resolveSubtitlePath, subtitleExtFromUrl } from './subs'
+import { isRetryable, retryDelayMs } from './retryPolicy'
+import { saveQueue } from './queueStore'
 
 interface Runtime {
   child?: ChildProcess
@@ -19,20 +24,54 @@ interface Runtime {
   /** Highest percent seen this run, so the bar never jumps backward (YouTube
    * downloads video then audio as separate 0→100 passes). */
   maxPercent?: number
+  /** Pending automatic retry while status === 'retrying'. */
+  retryTimer?: NodeJS.Timeout
+  /** Percent when the last run failed; progress past it resets the retry budget. */
+  percentAtFailure?: number
 }
+
+// Statuses that occupy a concurrency slot (a process/request is running).
+const RUNNING: DownloadStatus[] = ['preparing', 'downloading']
+
+// How often to re-check connectivity while a retry waits for the network.
+const OFFLINE_POLL_MS = 5_000
+// Throttle for writing queue.json (progress patches arrive several times a second).
+const PERSIST_DELAY_MS = 1_500
 
 /**
  * Owns the download queue: enforces a concurrency limit and drives each item's
- * lifecycle. Emits 'progress' (ProgressUpdate) and 'item' (DownloadItem) events
- * which the IPC layer forwards to the renderer.
+ * lifecycle, including automatic retries after transient failures. Emits
+ * 'progress' (ProgressUpdate) and 'item' (DownloadItem) events which the IPC
+ * layer forwards to the renderer, and persists the list to disk.
  */
 export class DownloadManager extends EventEmitter {
   private items = new Map<string, DownloadItem>()
   private runtime = new Map<string, Runtime>()
   private order: string[] = []
+  private persistTimer?: NodeJS.Timeout
 
-  constructor(private settings: AppSettings) {
+  constructor(
+    private settings: AppSettings,
+    saved: DownloadItem[] = []
+  ) {
     super()
+    for (const item of saved) {
+      // Anything that was mid-flight when the app quit comes back paused; its
+      // .part file lets yt-dlp --continue pick up where it stopped.
+      const interrupted = !['queued', 'paused', 'completed', 'error', 'canceled'].includes(item.status)
+      const restored: DownloadItem = {
+        ...item,
+        status: interrupted ? 'paused' : item.status,
+        speed: '',
+        eta: '',
+        notice: undefined,
+        retryAt: undefined
+      }
+      this.items.set(item.id, restored)
+      this.runtime.set(item.id, {})
+      this.order.push(item.id)
+    }
+    this.pump()
   }
 
   updateSettings(s: AppSettings): void {
@@ -68,6 +107,7 @@ export class DownloadManager extends EventEmitter {
       created.push(item)
     }
     this.pump()
+    this.schedulePersist()
     return created
   }
 
@@ -75,18 +115,25 @@ export class DownloadManager extends EventEmitter {
     const item = this.items.get(id)
     const rt = this.runtime.get(id)
     if (!item || !rt) return
-    if (item.status === 'downloading' && rt.child) {
+    if (rt.child || rt.abort) {
       rt.intentionalStop = 'paused'
-      rt.child.kill('SIGTERM')
-    } else if (item.status === 'queued') {
-      this.patch(id, { status: 'paused' })
+      rt.child?.kill('SIGTERM')
+      rt.abort?.()
+    } else if (item.status === 'queued' || item.status === 'retrying') {
+      this.clearRetry(rt)
+      this.patch(id, { status: 'paused', retryAt: undefined })
     }
   }
 
+  /** Resume a paused item, or retry a failed / waiting one right away. */
   resume(id: string): void {
     const item = this.items.get(id)
-    if (!item || item.status !== 'paused') return
-    this.patch(id, { status: 'queued' })
+    const rt = this.runtime.get(id)
+    if (!item || !rt) return
+    if (item.status !== 'paused' && item.status !== 'error' && item.status !== 'retrying') return
+    this.clearRetry(rt)
+    // A manual resume/retry is a fresh start: give it the full retry budget again.
+    this.patch(id, { status: 'queued', attempt: 0, retryAt: undefined, error: undefined })
     this.pump()
   }
 
@@ -94,12 +141,13 @@ export class DownloadManager extends EventEmitter {
     const item = this.items.get(id)
     const rt = this.runtime.get(id)
     if (!item || !rt) return
-    if (item.status === 'downloading' && (rt.child || rt.abort)) {
+    if (rt.child || rt.abort) {
       rt.intentionalStop = 'canceled'
       rt.child?.kill('SIGTERM')
       rt.abort?.()
     } else {
-      this.patch(id, { status: 'canceled' })
+      this.clearRetry(rt)
+      this.patch(id, { status: 'canceled', retryAt: undefined })
     }
   }
 
@@ -111,14 +159,39 @@ export class DownloadManager extends EventEmitter {
     this.runtime.delete(id)
     this.order = this.order.filter((x) => x !== id)
     this.emit('removed', id)
+    this.schedulePersist()
   }
 
   getFilePath(id: string): string | undefined {
     return this.items.get(id)?.filePath
   }
 
+  /**
+   * App is quitting: stop every running process (they would otherwise keep
+   * writing to the same .part files after a relaunch) and save the queue with
+   * those items marked paused.
+   */
+  shutdown(): void {
+    for (const [id, rt] of this.runtime) {
+      this.clearRetry(rt)
+      const item = this.items.get(id)
+      if (!item) continue
+      if (rt.child || rt.abort) {
+        rt.intentionalStop = 'paused'
+        rt.child?.kill('SIGTERM')
+        rt.abort?.()
+      }
+      if (RUNNING.includes(item.status) || item.status === 'retrying') {
+        Object.assign(item, { status: 'paused', speed: '', eta: '', retryAt: undefined })
+      }
+    }
+    if (this.persistTimer) clearTimeout(this.persistTimer)
+    this.persistTimer = undefined
+    saveQueue(this.list())
+  }
+
   private runningCount(): number {
-    return this.list().filter((i) => i.status === 'downloading').length
+    return this.list().filter((i) => RUNNING.includes(i.status)).length
   }
 
   /** Start as many queued items as the concurrency limit allows. */
@@ -149,7 +222,15 @@ export class DownloadManager extends EventEmitter {
     if (!item.outputBase) {
       item.outputBase = resolveOutputBase(item.outputDir, item.title, item.format)
     }
-    this.patch(id, { status: 'preparing', percent: 0, speed: '', eta: '', error: undefined })
+    this.patch(id, {
+      status: 'preparing',
+      percent: 0,
+      speed: '',
+      eta: '',
+      notice: undefined,
+      retryAt: undefined,
+      error: undefined
+    })
 
     const handle = startDownload({
       id,
@@ -169,34 +250,21 @@ export class DownloadManager extends EventEmitter {
           speed: p.speed,
           eta: p.eta,
           downloaded: p.downloaded,
-          total: p.total
+          total: p.total,
+          notice: undefined,
+          ...this.progressedPastFailure(rt, percent)
         })
         this.emit('progress', update)
+      },
+      onRetry: (count) => {
+        this.patch(id, { speed: '', eta: '', notice: `Connection lost — retrying (${count})` })
       }
     })
     rt.child = handle.child
 
     handle.done.then((res) => {
       rt.child = undefined
-      const stop = rt.intentionalStop
-      rt.intentionalStop = undefined
-
-      if (stop === 'paused') {
-        this.patch(id, { status: 'paused', speed: '', eta: '' })
-      } else if (stop === 'canceled') {
-        this.patch(id, { status: 'canceled', speed: '', eta: '' })
-      } else if (res.code === 0) {
-        this.patch(id, {
-          status: 'completed',
-          percent: 100,
-          speed: '',
-          eta: '',
-          filePath: res.filePath
-        })
-      } else {
-        this.patch(id, { status: 'error', speed: '', eta: '', error: res.error })
-      }
-      this.pump()
+      this.settle(id, res)
     })
   }
 
@@ -230,17 +298,79 @@ export class DownloadManager extends EventEmitter {
 
     handle.done.then((res) => {
       rt.abort = undefined
-      const stop = rt.intentionalStop
-      rt.intentionalStop = undefined
-      if (stop === 'canceled') {
-        this.patch(id, { status: 'canceled', speed: '', eta: '' })
-      } else if (res.code === 0) {
-        this.patch(id, { status: 'completed', percent: 100, filePath: res.filePath })
-      } else {
-        this.patch(id, { status: 'error', error: res.error })
-      }
-      this.pump()
+      this.settle(id, res)
     })
+  }
+
+  /** Route a finished run to its next state: paused/canceled/done, an automatic retry, or failed. */
+  private settle(id: string, res: DownloadResult): void {
+    const item = this.items.get(id)
+    const rt = this.runtime.get(id)
+    if (!item || !rt) return
+    const stop = rt.intentionalStop
+    rt.intentionalStop = undefined
+    const idle = { speed: '', eta: '', notice: undefined }
+
+    if (stop === 'paused') {
+      this.patch(id, { status: 'paused', ...idle })
+    } else if (stop === 'canceled') {
+      this.patch(id, { status: 'canceled', ...idle })
+    } else if (res.code === 0) {
+      this.patch(id, { status: 'completed', percent: 100, ...idle, filePath: res.filePath })
+    } else if (isRetryable(res.error) && (item.attempt ?? 0) < MAX_AUTO_RETRIES) {
+      this.scheduleRetry(id, res.error)
+    } else {
+      this.patch(id, { status: 'error', ...idle, retryAt: undefined, error: res.error })
+    }
+    this.pump()
+  }
+
+  private scheduleRetry(id: string, error: string | undefined): void {
+    const item = this.items.get(id)
+    const rt = this.runtime.get(id)
+    if (!item || !rt) return
+    const attempt = (item.attempt ?? 0) + 1
+    const delay = retryDelayMs(attempt)
+    rt.percentAtFailure = item.percent
+    this.patch(id, {
+      status: 'retrying',
+      attempt,
+      retryAt: Date.now() + delay,
+      speed: '',
+      eta: '',
+      notice: undefined,
+      error
+    })
+    rt.retryTimer = setTimeout(() => this.fireRetry(id), delay)
+  }
+
+  /** Retry timer fired: re-queue the item, or keep waiting while offline (doesn't use up attempts). */
+  private fireRetry(id: string): void {
+    const item = this.items.get(id)
+    const rt = this.runtime.get(id)
+    if (!item || !rt) return
+    rt.retryTimer = undefined
+    if (item.status !== 'retrying') return
+    if (!net.isOnline()) {
+      this.patch(id, { retryAt: Date.now() + OFFLINE_POLL_MS, notice: 'Waiting for network…' })
+      rt.retryTimer = setTimeout(() => this.fireRetry(id), OFFLINE_POLL_MS)
+      return
+    }
+    // Back into the queue (not started directly) so the concurrency limit holds.
+    this.patch(id, { status: 'queued', retryAt: undefined, notice: undefined })
+    this.pump()
+  }
+
+  /** Once a retried download gets further than where it failed, restore its retry budget. */
+  private progressedPastFailure(rt: Runtime, percent: number): Partial<DownloadItem> {
+    if (rt.percentAtFailure === undefined || percent <= rt.percentAtFailure + 1) return {}
+    rt.percentAtFailure = undefined
+    return { attempt: 0 }
+  }
+
+  private clearRetry(rt: Runtime): void {
+    if (rt.retryTimer) clearTimeout(rt.retryTimer)
+    rt.retryTimer = undefined
   }
 
   /** Apply a partial update and emit it. */
@@ -249,5 +379,15 @@ export class DownloadManager extends EventEmitter {
     if (!item) return
     Object.assign(item, partial)
     this.emit('item', { ...item })
+    this.schedulePersist()
+  }
+
+  /** Save queue.json at most once per PERSIST_DELAY_MS, with the latest state. */
+  private schedulePersist(): void {
+    if (this.persistTimer) return
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = undefined
+      saveQueue(this.list())
+    }, PERSIST_DELAY_MS)
   }
 }

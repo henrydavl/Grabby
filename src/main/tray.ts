@@ -25,9 +25,11 @@ function statusLabel(manager: DownloadManager): string {
     (i) => i.status === 'downloading' || i.status === 'preparing'
   ).length
   const queued = items.filter((i) => i.status === 'queued').length
-  if (active === 0 && queued === 0) return 'Idle'
+  const retrying = items.filter((i) => i.status === 'retrying').length
+  if (active === 0 && queued === 0 && retrying === 0) return 'Idle'
   const parts: string[] = []
   if (active > 0) parts.push(`Downloading ${active}`)
+  if (retrying > 0) parts.push(`Retrying ${retrying}`)
   if (queued > 0) parts.push(`Queued ${queued}`)
   return parts.join(' · ')
 }
